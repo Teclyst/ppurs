@@ -6,21 +6,6 @@ type constant =
 type ident =
   string
 
-type binop =
-  | Beq
-  | Bneq
-  | Bsl
-  | Bleq
-  | Bsg
-  | Bgeq
-  | Badd
-  | Bsub
-  | Bmul
-  | Bdiv
-  | Bconcat
-  | Band
-  | Bor
-
 type purstype =
   | Tat of ident
   | Tcstr of ident * (purstype list)
@@ -34,7 +19,6 @@ type expr =
   | Econs of constant
   | Evar of ident
   | Etyped of expr * purstype
-  | Eopp of expr
   | Eapp of ident * (expr list)
   | Eif of expr * expr * expr
   | Edo of expr list
