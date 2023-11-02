@@ -22,29 +22,17 @@ type expr =
   | Eapp of ident * (expr list)
   | Eif of expr * expr * expr
   | Edo of expr list
-  | Elocbind of binding list * expr
-  | Ecase of branch list
+  | Elocbind of decl list * expr
+  | Ecase of (pattern * expr) list
 
-and binding =
-  | Bibind of ident * expr
-
-and branch =
-  | Brbranch of pattern * expr
-
-type instance =
-  | Itype of purstype
-  | Idrved of purstype list * purstype
-
-(* An instance should always match Itype (Tcstr _) or Idrved ([Tcstr _; ...; Tcstr _], Tcstr _). *)
-
-type decl =
+and decl =
   | Ddef of ident * (pattern list) * expr
   | Dtdecl of ident * (ident list) * (purstype list) * (purstype list)
   | Ddata of ident * (ident list) * (( ident * purstype list) list)
   | Dclass of ident * (ident list) * (decl list)
-  | Dinst of instance * (decl list)
+  | Dinst of purstype list * purstype * (decl list)
 
 (* Dclass _ should always match Dclass _ _ [Dtdecl _; ...; Dtdecl _]. *)
-(* Dinst _ should always match Dclass _ _ [Ddef _; ...; Ddef _]. *)
+(* Dinst _ should always match Dinst [Tcstr _; ...; Tcstr] Tcstr [Ddef _; ...; Ddef _]. *)
   
 type file = decl list
