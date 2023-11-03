@@ -26,7 +26,7 @@ type expr =
   | Ecase of (pattern * expr) list
 
 and decl =
-  | Ddef of ident * (pattern list) * expr
+  | Ddefn of ident * (pattern list) * expr
   | Dtdecl of ident * (ident list) * (purstype list) * (purstype list)
   | Ddata of ident * (ident list) * (( ident * purstype list) list)
   | Dclass of ident * (ident list) * (decl list)
