@@ -12,7 +12,7 @@ type purstype =
 
 type pattern =
   | Pcons of constant
-  | Pid of ident
+  | Pform of ident
   | Pcstr of ident * (pattern list)
 
 type expr =
