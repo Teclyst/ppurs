@@ -19,6 +19,7 @@ type expr =
   | Econs of constant
   | Evar of ident
   | Etyped of expr * purstype
+  | Eopp of expr
   | Eapp of ident * (expr list)
   | Eif of expr * expr * expr
   | Edo of expr list
