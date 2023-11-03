@@ -33,6 +33,6 @@ and decl =
   | Dinst of purstype list * purstype * (decl list)
 
 (* Dclass _ should always match Dclass _ _ [Dtdecl _; ...; Dtdecl _]. *)
-(* Dinst _ should always match Dinst [Tcstr _; ...; Tcstr] Tcstr [Ddef _; ...; Ddef _]. *)
+(* Dinst _ should always match Dinst [Tcstr _; ...; Tcstr] Tcstr [Ddefn _; ...; Ddefn _]. *)
   
 type file = decl list
