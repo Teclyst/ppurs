@@ -6,7 +6,7 @@
 
 (* Token declaration. *)
 
-%token INIT EOF
+%token MODULE MAIN IMPRT PREL EF EFCONS EOF
 
 %token <string> UIDENT LIDENT
 %token LPAR RPAR LBRA RBRA COM SEMCOL DBLCOL
@@ -34,7 +34,7 @@
 
 (* Starting Point. *)
 
-%start <file> file
+%start <program> file
 
 %%
 
@@ -51,11 +51,20 @@ sep_list(t, n):
 nempt_sep_list(t, n):
   | x = n
     { x :: [] }
-  | x = n; t; ns = sep_list(t, n)
+  | x = n; t; ns = nempt_sep_list(t, n)
     { x :: ns } 
 
+nempt_sep_list_diff_end(t, m, n):
+  | y = n
+    { ([], y) }
+  | x = m; t; ms = nempt_sep_list_diff_end(t, m, n)
+    { let (l, y) = ms in
+      (x :: l, y) }
+
 file:
-  INIT; ds = nempt_sep_list(SEMCOL, decl); EOF
+  | MODULE; MAIN; WHERE; LBRA; IMPRT; PREL; SEMCOL; IMPRT; EF; SEMCOL; IMPRT; EFCONS; RBRA; EOF
+    { [] }
+  | MODULE; MAIN; WHERE; LBRA; IMPRT; PREL; SEMCOL; IMPRT; EF; SEMCOL; IMPRT; EFCONS ; SEMCOL ; ds = nempt_sep_list(SEMCOL, decl); RBRA; EOF
     { ds }
 
 decl:
@@ -64,11 +73,15 @@ decl:
   | d = tdecl
     { d }
   | DATA; did = UIDENT; forms = LIDENT *; BIND; cstrs = nempt_sep_list(BAR, cstrdecl)
-    { Ddata (did, forms, cstrs) }
+    { { loc = localisation $startpos;
+        decl = Ddata (did, forms, cstrs) } }
   | CLASS; cid = UIDENT; forms = LIDENT *; WHERE; LBRA; cvars = sep_list(SEMCOL, tdecl); RBRA
-    { Dclass (cid, forms, cvars) }
-  | INST; inst = instance; WHERE; LBRA; ivars = sep_list(SEMCOL, defn); RBRA
-    { let (impls, t) = inst in Dinst (impls, t, ivars) } 
+    { { loc = localisation $startpos;
+        decl = Dclass (cid, forms, cvars) } }
+  | INST; inst = instances; WHERE; LBRA; ivars = sep_list(SEMCOL, defn); RBRA
+    { let (impls, t) = inst in
+      { loc = localisation $startpos;
+        decl = Dinst (impls, t, ivars) } } 
 
 cstrdecl:
   cid = UIDENT; args = atype *
@@ -76,61 +89,73 @@ cstrdecl:
 
 defn:
   | fid = LIDENT; args = patarg *; BIND; e = expr
-    { Ddefn (fid, args, e) }
+    { { loc = localisation $startpos;
+        decl = Ddefn (fid, args, e) } }
 
 tdecl:
-  | var = LIDENT; DBLCOL; impls = nempt_sep_list(IMPL, ntype)
-    { let h :: t = List.rev impls in
-      Dtdecl (var, [], List.rev t, h :: []) }
-  | var = LIDENT; DBLCOL; FORALL; forms = LIDENT +; DOT; impls = nempt_sep_list(IMPL, ntype)
-    { let h :: t = List.rev impls in
-      Dtdecl (var, forms, List.rev t, h :: []) }
-  | var = LIDENT; DBLCOL; FORALL; forms = LIDENT +; DOT; impls = nempt_sep_list(IMPL, ntype); TO; tos = nempt_sep_list(TO, purstype)
-    { let h :: t = List.rev impls in
-      Dtdecl (var, forms, List.rev t, h :: tos) }
-  | var = LIDENT; DBLCOL; impls = nempt_sep_list(IMPL, ntype); TO; tos = nempt_sep_list(TO, purstype)
-    { let h :: t = List.rev impls in
-      Dtdecl (var, [], List.rev t, h :: tos) }
+  | var = LIDENT; DBLCOL; FORALL; forms = LIDENT +; DOT; impls = nempt_sep_list_diff_end(IMPL, instance, purstype)
+    { let (insts, ret) = impls in
+      { loc = localisation $startpos;
+        decl = Dtdecl (var, forms, insts, [], ret) } }
+  | var = LIDENT; DBLCOL; impls = nempt_sep_list_diff_end(IMPL, instance, purstype)
+    { let (insts, ret) = impls in
+      { loc = localisation $startpos;
+        decl = Dtdecl (var, [], insts, [], ret) } }
+  | var = LIDENT; DBLCOL; FORALL; forms = LIDENT +; DOT; impls = nempt_sep_list_diff_end(IMPL, instance, purstype); TO; tos = nempt_sep_list_diff_end(TO, purstype, purstype)
+    { let (insts, arg) = impls
+      and (args, ret) = tos in
+      { loc = localisation $startpos;
+        decl = Dtdecl (var, forms, insts, arg :: args, ret) } }
+  | var = LIDENT; DBLCOL; impls = nempt_sep_list_diff_end(IMPL, instance, purstype); TO; tos = nempt_sep_list_diff_end(TO, purstype, purstype)
+    { let (insts, arg) = impls
+      and (args, ret) = tos in
+      { loc = localisation $startpos;
+        decl = Dtdecl (var, [], insts, arg :: args, ret) } }
 
 ntype:
-  | t = UIDENT
-    { Tat t }
-  | t = cstrntype
-    { t }
-
-cstrntype:
   cstr = UIDENT; args = atype +
-    { Tcstr (cstr, args) }
+    { { loc = localisation $startpos;
+        purstype = PTcstr (cstr, args) } }
 
 atype:
   | t = LIDENT
-    { Tat t }
+    { { loc = localisation $startpos;
+        purstype = PTvar t } }
   | t = UIDENT
-    { Tat t }
+    { { loc = localisation $startpos;
+        purstype = PTcstr (t, []) } }
   | LPAR; t = purstype; RPAR
     { t }
 
 purstype:
   | t = atype
     { t }
-  | t = cstrntype
+  | t = ntype
     { t }
 
+instances:
+  | i = instance
+    { ([], i) }
+  | impl = instance; IMPL; i = instance
+    { (impl :: [], i) }
+  | LPAR; impls = nempt_sep_list(COM, instance); RPAR; IMPL; i = instance
+    { (impls, i) }
+
 instance:
-  | t = ntype
-    { ([], t) }
-  | impl = ntype; IMPL; t = ntype
-    { (impl :: [], t) }
-  | LPAR; impls = nempt_sep_list(COM, ntype); RPAR; t = ntype
-    { (impls, t) }
+  iid = UIDENT; args = atype *
+    { { loc = localisation $startpos;
+        instance = Iinst (iid, args) } }
 
 patarg:
   | c = constant
-    { Pcons c }
-  | form = LIDENT
-    { Pform form }
-  | form = UIDENT
-    { Pform form }
+    { { loc = localisation $startpos;
+        pattern = Pcons c } }
+  | var = LIDENT
+    { { loc = localisation $startpos;
+        pattern = Pvar var } }
+  | cstr = UIDENT
+    { { loc = localisation $startpos;
+        pattern = Pcstr (cstr, []) } }
   | LPAR; pat = pattern; RPAR
     { pat }
 
@@ -138,7 +163,8 @@ pattern:
   | pat = patarg
     { pat }
   | cstr = UIDENT; pats = patarg +
-    { Pcstr (cstr, pats) }
+    { { loc = localisation $startpos;
+        pattern = Pcstr (cstr, pats) } }
 
 constant:
   | b = BOOL
@@ -150,64 +176,88 @@ constant:
 
 atom:
   | c = constant
-    { Econs c }
+    { { loc = localisation $startpos;
+        expr = Econs c } }
   | var = LIDENT
-    { Evar var }
-  | var = UIDENT
-    { Evar var }
+    { { loc = localisation $startpos;
+        expr = Evar var } }
+  | cstr = UIDENT
+    { { loc = localisation $startpos;
+        expr = Ecstr (cstr, []) } }
   | LPAR; e = expr; RPAR
     { e }
   | LPAR; e = expr; DBLCOL; t = purstype; RPAR
-    { Etyped (e, t) }
+    { { loc = localisation $startpos;
+        expr = Etyped (e, t) } }
 
 expr:
   | at = atom
     { at }
-  | e1 = expr; b = OR; e2 = expr
-    { Eapp ("(||)", e1 :: e2 :: [])}
-  | e1 = expr; b = AND; e2 = expr
-    { Eapp ("(&&)", e1 :: e2 :: [])}
-  | e1 = expr; b = EQ; e2 = expr
-    { Eapp ("(==)", e1 :: e2 :: [])}
-  | e1 = expr; b = NEQ; e2 = expr
-    { Eapp ("(!=)", e1 :: e2 :: [])}
-  | e1 = expr; b = GEQ; e2 = expr
-    { Eapp ("(>=)", e1 :: e2 :: [])}
-  | e1 = expr; b = GT; e2 = expr
-    { Eapp ("(>)", e1 :: e2 :: [])}
-  | e1 = expr; b = LEQ; e2 = expr
-    { Eapp ("(<=)", e1 :: e2 :: [])}
-  | e1 = expr; b = LT; e2 = expr
-    { Eapp ("(<>)", e1 :: e2 :: [])}
-  | e1 = expr; b = ADD; e2 = expr
-    { Eapp ("(+)", e1 :: e2 :: [])}
-  | e1 = expr; b = SUB; e2 = expr
-    { Eapp ("(-)", e1 :: e2 :: [])}
-  | e1 = expr; b = CONC; e2 = expr
-    { Eapp ("(<>)", e1 :: e2 :: [])}
-  | e1 = expr; b = MUL; e2 = expr
-    { Eapp ("(*)", e1 :: e2 :: [])}
-  | e1 = expr; b = DIV; e2 = expr
-    { Eapp ("(/)", e1 :: e2 :: [])}
+  | e1 = expr; OR; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(||)", e1 :: e2 :: [])} }
+  | e1 = expr; AND; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(&&)", e1 :: e2 :: [])} }
+  | e1 = expr; EQ; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(==)", e1 :: e2 :: [])} }
+  | e1 = expr; NEQ; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(/=)", e1 :: e2 :: [])} }
+  | e1 = expr; GEQ; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(>=)", e1 :: e2 :: [])} }
+  | e1 = expr; GT; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(>)", e1 :: e2 :: [])} }
+  | e1 = expr; LEQ; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(<=)", e1 :: e2 :: [])} }
+  | e1 = expr; LT; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(<)", e1 :: e2 :: [])} }
+  | e1 = expr; ADD; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(+)", e1 :: e2 :: [])} }
+  | e1 = expr; SUB; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(-)", e1 :: e2 :: [])} }
+  | e1 = expr; CONC; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(<>)", e1 :: e2 :: [])} }
+  | e1 = expr; MUL; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(*)", e1 :: e2 :: [])} }
+  | e1 = expr; DIV; e2 = expr
+    { { loc = localisation $startpos;
+        expr = Eapp ("(/)", e1 :: e2 :: [])} }
   | SUB; e = expr
-    { Eopp e }
+    { { loc = localisation $startpos;
+        expr = Eapp ("negate", e :: []) } }
     %prec UNSUB
   | f = LIDENT; ats = atom +
-    { Eapp (f, ats) }
+    { { loc = localisation $startpos;
+        expr = Eapp (f, ats) } }
   | cstr = UIDENT; ats = atom +
-    { Eapp (cstr, ats) }
+    { { loc = localisation $startpos;
+        expr = Ecstr (cstr, ats) } }
   | IF; e1 = expr; THEN; e2 = expr; ELSE; e3 = expr
-    { Eif (e1, e2, e3) }
+    { { loc = localisation $startpos;
+        expr = Eif (e1, e2, e3) } }
   | DO; LBRA; es = nempt_sep_list(SEMCOL, expr); RBRA
-    { Edo es }
+    { { loc = localisation $startpos;
+        expr = Edo es } }
   | LET; LBRA; bnds = nempt_sep_list(SEMCOL, binding); RBRA; IN; e = expr
-    { Elocbind (bnds, e) }
+    { { loc = localisation $startpos;
+        expr = Elocbind (bnds, e) } }
   | CASE; e = expr; OF; LBRA; brchs = nempt_sep_list(SEMCOL, branch); RBRA
-    { Ecase (e, brchs) }
+    { { loc = localisation $startpos;
+        expr = Ecase (e, brchs) } }
 
 binding:
   var = LIDENT; BIND; e = expr
-    {Ddefn (var, [], e)}
+    { Bbind (var, e) }
 
 branch:
   p = pattern; TO; e = expr
