@@ -118,7 +118,7 @@ let str_of_const c =
     | Cint i ->
       string_of_int i
     | Cstr s ->
-      s
+      "\"" ^ s ^ "\""
 
 let str_of_pattern p =
   let rec aux init p =

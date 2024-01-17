@@ -30,7 +30,7 @@ let compactifies p =
                 { loc = tdecl.loc;
                   decl = Dcmpted (tdecl, (List.rev acc)) }, l))
       | _ ->
-        failwith "Shouldn't have happened." in
+        failwith "Shouldn't have happened.1" in
   let rec cuts l =
     match l with
       | ({ loc = loc ;
@@ -44,6 +44,8 @@ let compactifies p =
       | [] -> []
       | decl :: l' -> decl :: cuts l' in
   cuts p
+
+(* Rewrites a program to group definitions per declaration *)
 
 let compactifies_inst defns =
   let rec builds_block acc id loc defns =
@@ -75,12 +77,14 @@ let compactifies_inst defns =
       | [] ->
         []
       | _ ->
-        failwith "Shouldn't have happened." in
+        failwith "Shouldn't have happened.2" in
   cuts defns
+
+(* Rewrites an instance declaration to group definitions per method *)
 
 exception Found of int
 
-let finds_last_nonvar n defn =
+let find_nonvar defn =
   match defn.decl with
     | Ddefn (_, ps, e) ->
       List.iteri
@@ -92,9 +96,11 @@ let finds_last_nonvar n defn =
               raise (Found i))
         ps;
     | _ ->
-      failwith "Shouldn't have happened."
+      failwith "Shouldn't have happened.3"
 
-let rec subs_vars_in_expr mapping e =
+(* Used to find if a function definition involves a non generic argument *)
+
+let rec sub_vars_in_expr mapping e =
   match e.expr with
     | Econs _ ->
       e
@@ -106,36 +112,36 @@ let rec subs_vars_in_expr mapping e =
         e)
     | Etyped (e', p) ->
       { loc = e.loc;
-        expr = Etyped (subs_vars_in_expr mapping e', p) }
+        expr = Etyped (sub_vars_in_expr mapping e', p) }
     | Eapp (fid, args) ->
       { loc = e.loc;
-        expr = Eapp (fid, List.map (subs_vars_in_expr mapping) args) }
+        expr = Eapp (fid, List.map (sub_vars_in_expr mapping) args) }
     | Ecstr (cid, args) ->
       { loc = e.loc;
-        expr = Ecstr (cid, List.map (subs_vars_in_expr mapping) args) }
+        expr = Ecstr (cid, List.map (sub_vars_in_expr mapping) args) }
     | Eif (eif, ethen, eelse) ->
       { loc = e.loc;
-        expr = Eif (subs_vars_in_expr mapping eif, subs_vars_in_expr mapping ethen, subs_vars_in_expr mapping eelse) }
+        expr = Eif (sub_vars_in_expr mapping eif, sub_vars_in_expr mapping ethen, sub_vars_in_expr mapping eelse) }
     | Edo es ->
       { loc = e.loc;
-        expr = Edo (List.map (subs_vars_in_expr mapping) es) }
+        expr = Edo (List.map (sub_vars_in_expr mapping) es) }
     | Elocbind (bs, e') ->
       { loc = e.loc;
-        expr = Elocbind (List.map (subs_vars_in_locbind mapping) bs, e') }
+        expr = Elocbind (List.map (sub_vars_in_locbind mapping) bs, sub_vars_in_expr mapping e') }
     | Ecase (e', brnchs) ->
       { loc = e.loc;
         expr = Ecase
-          (subs_vars_in_expr mapping e',
+          (sub_vars_in_expr mapping e',
           List.map
             (fun (p, e) ->
-              (subs_vars_in_pattern mapping p, subs_vars_in_expr mapping e)) brnchs) }
+              (sub_vars_in_pattern mapping p, sub_vars_in_expr mapping e)) brnchs) }
 
-and subs_vars_in_locbind mapping (Bbind (var, e)) =
-  try Bbind (Smap.find var mapping, subs_vars_in_expr mapping e)
+and sub_vars_in_locbind mapping (Bbind (var, e)) =
+  try Bbind (Smap.find var mapping, sub_vars_in_expr mapping e)
   with Not_found ->
-    Bbind (var, subs_vars_in_expr mapping e)
+    Bbind (var, sub_vars_in_expr mapping e)
 
-and subs_vars_in_pattern mapping p =
+and sub_vars_in_pattern mapping p =
   match p.pattern with
     | Pcons _ ->
       p
@@ -147,9 +153,11 @@ and subs_vars_in_pattern mapping p =
         p)
     | Pcstr (cid, args) ->
       { loc = p.loc;
-        pattern = Pcstr (cid, List.map (subs_vars_in_pattern mapping) args) }
+        pattern = Pcstr (cid, List.map (sub_vars_in_pattern mapping) args) }
 
-let treats_defn n i defn =
+(* Rewrites an AST by renaming a set of variables (used to convert a series of definitions to a case expression) *)
+
+let treat_defn n i defn =
   match defn.decl with
   | Ddefn (id, ps, e) ->
     let mapping = ref Smap.empty
@@ -160,7 +168,11 @@ let treats_defn n i defn =
     List.iteri
       (fun j p ->
         match p.pattern, j with
-          | _ when i = j -> ipat := Some p
+          | Pvar v, _ when i = j ->
+            mapping := Smap.add v (string_of_int j) !mapping;
+            ipat := Some p
+          | _ when i = j ->
+            ipat := Some p
           | Pvar v, _ ->
             mapping := Smap.add v (string_of_int j) !mapping
           | _ -> 
@@ -168,45 +180,54 @@ let treats_defn n i defn =
       ps;
     (match !ipat with
       | Some p ->
-        (p, subs_vars_in_expr !mapping e)
+        (p, sub_vars_in_expr !mapping e)
       | _ ->
         failwith "Shouldn't have happened.")
   | _ ->
     failwith "Shouldn't have happened."
 
-let checks_if_vars_differ pvars =
-  let alrseen = ref Smap.empty in
-  List.iter
-    (fun p ->
-      match p.pattern with
-        | Pvar v when v <> "_" ->
-          (try let () = Smap.find v !alrseen in
-            raise (Typing_error ("Variable " ^ v ^ " appears more than once.", p.loc))
-          with Not_found ->
-            alrseen := Smap.add v () !alrseen)
+(* Given a column i and a definition defn, returns the pattern at column i and the expression of defn, where occurrences of the other (variable) patterns are replaced by their column converted to string *)
+
+let check_if_vars_differ defn =
+  match defn.decl with
+    | Ddefn (_, pvars, _) ->
+      let alrseen = ref Smap.empty in
+      let rec aux p =
+        match p.pattern with
+          | Pvar v when v <> "_" ->
+            (try let () = Smap.find v !alrseen in
+              raise (Typing_error ("Variable " ^ v ^ " appears more than once.", p.loc))
+            with Not_found ->
+              alrseen := Smap.add v () !alrseen)
           | Pvar v ->
             ()
-        | _ ->
-          failwith "Shouldn't have happened.")
-    pvars
+          | Pcstr (_, args) ->
+            List.iter aux args
+          | _ ->
+            () in
+      List.iter
+        aux
+        pvars
+    | _ ->
+      failwith "Shouldn't have happened."
 
-let compactifies_fun_dec n defns =
+let compactify_fun_dec n defns =
   let fst = List.hd defns in
   (match fst.decl with
     | Ddefn (id, ps, e) ->
+      List.iter check_if_vars_differ defns;
       let i =
-        (try List.iter (finds_last_nonvar n) defns;
+        (try List.iter find_nonvar defns;
           -1
         with Found i ->
           i) in
-      (if n = 0 && List.length defns > 1
-        then raise (Typing_error ("Multiple value declarations exist for " ^ id ^ ".", e.loc)));
-      (match i with
-        | _ when i = -1 && n = 0 ->
-          checks_if_vars_differ ps;
+      let i = max 0 i in
+      (match n with
+        | 0 when List.length defns > 1 ->
+          raise (Typing_error ("Multiple value declarations exist for " ^ id ^ ".", fst.loc))
+        | 0 ->
           fst
-        | _ ->
-          let i = max 0 i in
+        | _ -> 
           { loc = fst.loc ;
             decl = Ddefn (id,
             List.mapi
@@ -218,9 +239,11 @@ let compactifies_fun_dec n defns =
                 Ecase
                   ({ loc = e.loc;
                     expr = Evar (string_of_int i) },
-                  List.map (treats_defn n i) defns ) }) })
+                  List.map (treat_defn n i) defns ) }) })
     | _ ->
       failwith "Shouldn't have happened.")
+
+(* Converts a group of definitions to a single definition with a case expression *)      
 
 
 (*Type definitions for types*)
@@ -239,11 +262,11 @@ exception UnificationFailure of typ * typ
 
 (*Auxiliary functions for type handling*)
 
-let form_ident = ref 0
+let id_ref = ref 0
 
 let new_id () =
-  let id = !form_ident in
-  incr form_ident;
+  let id = !id_ref in
+  incr id_ref;
   id
 
 let rec head ut =
@@ -262,7 +285,7 @@ let rec clean_up t =
     | t' ->
       t'
 
-let str_of_type t =
+let str_of_typ t =
     let rec aux init t =
       match head t with
         | Tvar v ->
@@ -307,6 +330,8 @@ let rec is_subst t1 t2 =
           true)
     | _ -> false
 
+(* is_subst assumes that t2 is cleaned up *)
+
 and is_subst_typ_lists t1s t2s =
   List.for_all2 is_subst t1s t2s
 
@@ -339,39 +364,42 @@ let rec generalise mapping t =
       Tcstr (c, List.map (generalise mapping) args)
     | _ -> t
 
+(* Given a typ, and a mapping of its type variables to typs, replace these type variables within t according to the mapping *)
+
 
 (*Type definitions for typing environments*)
 
 type tdata =
-  { ar: int;
-    cstrs: unit Smap.t }
+  { ar : int;
+    forms : typ list;
+    cstrs : unit Smap.t }
 
 type inst =
-  { id: ident;
-    args: typ list}
+  { id : ident;
+    args : typ list}
 
 type var =
-  { typ: typ;
-    insts: inst list }
+  { typ : typ;
+    insts : inst list }
 
 and func =
-  { args: typ list;
-    ret: typ;
-    insts: inst list }
+  { args : typ list;
+    ret : typ;
+    insts : inst list }
 
 type inst_scheme =
-  { ded: typ list;
-    impl: inst list }     
+  { ded : typ list;
+    impl : inst list }     
 
 type tpclass =
-  { ar: int;
-    forms: typ list;
-    methods: ident list;
-    insts: inst_scheme list}
+  { ar : int;
+    forms : typ list;
+    methods : ident list;
+    insts : inst_scheme list}
 
 type cstr =
-  { args: typ list;
-    typ: typ }
+  { args : typ list;
+    typ : typ }
   
 type tenv_element =
   | TV
@@ -416,22 +444,27 @@ let gtenv =
       (List.to_seq 
         [ ("Unit", TD
             { ar = 0;
+              forms = [];
               cstrs = Smap.empty});
           ("Boolean", TD
             { ar = 0;
+              forms = [];
               cstrs = Smap.empty});
           ("Int", TD
             { ar = 0;
+              forms = [];
               cstrs = Smap.empty});
           ("String", TD
             { ar = 0;
+              forms = [];
               cstrs = Smap.empty});
           ("Effect", TD
             { ar = 1;
+              forms = [ Tform def_form ];
               cstrs = Smap.empty});
           ("Eq", TTC
             { ar = 1;
-              methods = [ "(==)"; "(/=)" ];
+              methods = [ "eq" ];
               forms = [ Tform def_form ]; 
               insts = 
                 [ { ded = [ _Unit ];
@@ -441,7 +474,16 @@ let gtenv =
                   { ded = [ _Int ];
                     impl = [] };
                   { ded = [ _String ];
-                    impl = [] }; ] }) ])
+                    impl = [] } ] });
+            ("Show", TTC
+            { ar = 1;
+              methods = [ "show" ];
+              forms = [ Tform def_form ]; 
+              insts = 
+                [ { ded = [ _Boolean ];
+                    impl = [] };
+                  { ded = [ _Int ];
+                    impl = [] } ] }) ])
       gte)
 
 let gvenv =
@@ -459,11 +501,11 @@ let gvenv =
             { args = [ _Boolean ];
               ret = _Boolean;
               insts = [] });
-          ("(&&)", F 
+          ("conj", F 
             { args = [ _Boolean; _Boolean ];
               ret = _Boolean;
               insts = [] });
-          ("(||)", F 
+          ("disj", F 
             { args = [ _Boolean; _Boolean ];
               ret = _Boolean;
               insts = [] });
@@ -471,54 +513,64 @@ let gvenv =
             { args = [ _Int ];
               ret = _Int;
               insts = [] }); 
-          ("(+)", F 
+          ("add", F 
             { args = [ _Int; _Int ];
               ret = _Int;
               insts = [] });
-          ("(-)", F 
+          ("sub", F 
             { args = [ _Int; _Int ];
               ret = _Int;
               insts = [] });
-          ("(*)", F 
+          ("mul", F 
             { args = [ _Int; _Int ];
               ret = _Int;
               insts = [] });
-          ("(/)", F 
+          ("div", F 
             { args = [ _Int; _Int ];
               ret = _Int;
+              insts = [] });
+          ("append", F 
+            { args = [ _String; _String ];
+              ret = _String;
               insts = [] });
           ("mod", F 
             { args = [ _Int; _Int ];
               ret = _Int;
               insts = [] });
-          ("(<=)", F 
+          ("lessThanOrEq", F 
             { args = [ _Int; _Int ];
               ret = _Boolean;
               insts = [] });
-          ("(>=)", F 
+          ("greaterThanOrEq", F 
             { args = [ _Int; _Int ];
               ret = _Boolean;
               insts = [] });
-          ("(<)", F 
+          ("lessThan", F 
             { args = [ _Int; _Int ];
               ret = _Boolean;
               insts = [] });
-          ("(>)", F 
+          ("greaterThan", F 
             { args = [ _Int; _Int ];
               ret = _Boolean;
               insts = [] });
-          ("(==)", F 
+          ("eq", F 
             { args = [Tform def_form; Tform def_form];
               ret = _Boolean;
               insts = 
                 [ { id = "Eq";
                     args = [Tform def_form] } ] });
-          ("(/=)", F 
+          ("notEq", F 
             { args = [Tform def_form; Tform def_form];
               ret = _Boolean;
               insts = 
                 [ { id = "Eq";
                     args = [ Tform def_form ] } ] });
+          ("show", F 
+            { args = 
+              [ Tform def_form ];
+              ret = _String;
+              insts = [ { id = "Show";
+              args = [ Tform def_form ] } ] });
           ("pure", F 
             { args = 
               [ Tform def_form ];
@@ -529,21 +581,29 @@ let gvenv =
 
 
 (*Type definitions for type-annoted asts*)      
+
+type phistory =
+  int list
+
 type tinstance =
   | TIinst of ident * (typ list)
 
 type typ_tpattern =
-  { pattern: tpattern;
-    typ: typ }
+  { pattern : tpattern;
+    typ : typ }
 
 and tpattern =
   | TPcons of constant
   | TPvar of ident
   | TPcstr of ident * (typ_tpattern list)
 
+type typ_arg =
+  { var : ident;
+    typ : typ}
+
 type typ_texpr =
-  { expr: texpr;
-    typ: typ }
+  { expr : texpr;
+    typ : typ }
 
 and texpr =
   | TEcons of constant
@@ -552,18 +612,25 @@ and texpr =
   | TEcstr of ident * (typ_texpr list)
   | TEif of typ_texpr * typ_texpr * typ_texpr
   | TEdo of typ_texpr list
-  | TElocbind of decl list * typ_texpr
-  | TEcase of typ_texpr * ((typ_tpattern * typ_texpr) list)
+  | TElocbind of tbinding list * typ_texpr
+  | TEcasebind of ident * phistory * typ_texpr
+  | TEcase of typ_texpr * tcase
 
 and tbinding =
   | TBbind of ident * typ_texpr
 
+and tcase =
+  | TCret of typ_texpr
+  | TCcstr of phistory * (ident * tcase) list * tcase
+  | TCbool of phistory * (bool * tcase) list * tcase
+  | TCint of phistory * (int * tcase) list * tcase
+  | TCstr of phistory * (string * tcase) list * tcase
+
 and tdecl =
-  | TDdefn of ident * (typ_tpattern list) * typ_texpr
+  | TDdefn of ident * (typ_arg list) * typ_texpr
   | TDinst of tinstance * (tdecl list)
     
 type tprogram = tdecl list
-
 
 (* Instance resolution checks *)
 
@@ -611,6 +678,19 @@ let copy_inst_scheme inst_s =
             args = List.map (type_copy_aux mapping) inst.args})
         inst_s.impl }
 
+let copy_cstrs (data : tdata) =
+  let mapping = ref Imap.empty in
+  List.map (type_copy_aux mapping) data.forms,
+  Smap.mapi
+    (fun id () ->
+      (match Smap.find id !gvenv with
+        | C c ->
+          { args = List.map (type_copy_aux mapping) c.args;
+            typ = type_copy_aux mapping c.typ }
+        | _ ->
+          failwith "Shouldn't have happened."))
+    data.cstrs
+
 let copy_methods tpclass =
   let mapping = ref Imap.empty in
   (List.map (type_copy_aux mapping) tpclass.forms,
@@ -618,19 +698,20 @@ let copy_methods tpclass =
     (fun methods id ->
       Smap.add
         id
-        (Some
-          (match Smap.find id !gvenv with
-            | V v ->
-              V
+        (match Smap.find id !gvenv with
+          | V v ->
+            Some 
+              (V
                 { typ = type_copy_aux mapping v.typ;
                   insts =
                     List.map
                       (fun inst ->
                         { id = inst.id;
                           args = List.map (type_copy_aux mapping) inst.args })
-                      v.insts }
-            | F f ->
-              F
+                      v.insts })
+          | F f ->
+            Some
+              (F
                 { ret = type_copy_aux mapping f.ret;
                   args = List.map (type_copy_aux mapping) f.args;
                   insts =
@@ -638,12 +719,14 @@ let copy_methods tpclass =
                       (fun inst ->
                         { id = inst.id;
                           args = List.map (type_copy_aux mapping) inst.args })
-                      f.insts }
-            | _ ->
-              failwith "Shouldn't have happened."))
+                      f.insts })
+          | _ ->
+            failwith "Shouldn't have happened.")
           methods)
     Smap.empty  
     tpclass.methods)
+
+(* These functions are used to obtain copies of elements of typing environments, with different formal type variables *)    
 
 let rec is_solved tenv inst =
   match Smap.find inst.id tenv with
@@ -656,19 +739,28 @@ let rec is_solved tenv inst =
     | _ ->
       failwith ("Shouldn't have happened.")
 
+(* Checks if an instance is solved *)      
+
 let (to_be_checked : (inst * loc) Stack.t) = Stack.create ()
+
+(* Stack of instances whose solvabilty is to be checked once their types are determined *)
 
 
 (*Pattern matching exhaustivity check*)
 
-type pmatrix = typ_tpattern list list
+type pmatrix = ((typ_tpattern * phistory) list * typ_texpr) list
 
 exception Non_exhaust of loc_pattern list
 
 let convert_to_pmatrix (brnchs : (typ_tpattern * typ_texpr) list) =
-  (List.map (fun (p, _) -> [ p ]) brnchs : pmatrix)
+  (List.map
+    (fun (p, e) ->
+      ([ (p, []) ], e))
+    brnchs : pmatrix)
 
-let wildcards_list n =
+(* Converts the branches of a case expression to the corresponding pattern matrix *)
+
+let wildcard_list n =
   (List.init
     n
     (fun _ ->
@@ -686,119 +778,494 @@ let slice i l =
         failwith "List is too short." in
   aux i [] l
 
-let rec test_for_exhaustivity (pmat : pmatrix) =
+let dummy_typ =
+  Tvar "_"
+
+let rec pmatrix_to_tcase (pmat : pmatrix) =
   match pmat with
     | [] ->
       failwith "Shouldn't have happened."
-    | pr :: _ ->
+    | (pr, e) :: _ ->
       (match pr with
         | [] ->
-          ()
-        | p :: pr'  ->
-          (match List.exists
-            (fun pr ->
-              match (List.hd pr).pattern with
-                | TPvar _ -> true
-                | _ -> false)
-            pmat with
-            | true ->
-              (try test_for_exhaustivity (List.map List.tl pmat)
-              with Non_exhaust ps ->
-                raise
-                  (Non_exhaust
-                    ({ loc = dummy_pos;
-                      pattern = Pvar "_" } :: ps)))
-            | _ ->
-              (match p.typ with
-                | t when t = _Int || t = _String ->
-                  raise
-                    (Non_exhaust (wildcards_list (List.length pr)))
-                | t when t = _Boolean ->
-                  (match List.exists
-                    (fun pr ->
-                      match (List.hd pr).pattern with
-                        | TPcons Cbool true -> true
-                        | _ -> false)
-                    pmat with
-                    | true ->
-                      ()
-                    | _ ->
-                      raise
-                        (Non_exhaust
-                          ({ loc = dummy_pos;
-                            pattern = Pcons (Cbool true) } ::
-                          wildcards_list (List.length pr - 1))));
-                  (match List.exists
-                    (fun pr ->
-                      match (List.hd pr).pattern with
-                        | TPcons Cbool false -> true
-                        | _ -> false)
-                    pmat with
-                    | true ->
-                      ()
-                    | _ ->
-                      raise
-                        (Non_exhaust
-                          ({ loc = dummy_pos;
-                            pattern = Pcons (Cbool false) } ::
-                          wildcards_list (List.length pr - 1))));
-                  (try test_for_exhaustivity (List.map List.tl pmat)
-                  with Non_exhaust ps ->
-                    raise
-                      (Non_exhaust
-                        ({ loc = dummy_pos;
-                          pattern = Pvar "_" } :: ps)))
-                | Tcstr (c, args) ->
-                  let cstrs = Smap.map
-                    (fun () -> ([] : pmatrix))
-                    (match (Smap.find c !gtenv) with
-                      | TD d ->
-                        d.cstrs
+          TCret e
+        | (p, h) :: pr'  ->
+          (match head p.typ with
+            | t when t = _Int ->
+              (let i = ref 0 in
+              match
+                List.exists
+                  (fun (p, _) ->
+                    match p.pattern with
+                      | TPvar _ ->
+                        true
+                      | TPcons (Cint k) ->
+                        i := max !i k;
+                        false
                       | _ ->
-                        failwith "Shouldn't have happened.") in
-                  let sign =
-                    List.fold_left
-                      (fun sign pr ->
-                        match (List.hd pr).pattern with
-                          | TPcstr (cid, args) ->
-                            let cpmat = Smap.find cid sign in
-                            Smap.add cid ((args @ List.tl pr) :: cpmat) sign
+                        false)
+                  (List.map
+                    (fun (pr, e) -> List.hd pr)
+                    pmat) with
+                | false ->
+                  raise
+                    (Non_exhaust
+                      ({ loc = dummy_pos;
+                        pattern = Pcons (Cint (!i + 1))}
+                      :: wildcard_list (List.length pr - 1)))
+                | _ ->
+                  let sub_pmats =
+                    List.fold_right
+                      (fun (pr, e) (sub_pmats : pmatrix Smap.t) ->
+                        match pr with
+                          | ({ pattern = TPvar x;
+                              typ = _ }
+                            , _)
+                            :: pr' when x = "_" ->
+                              Smap.map
+                                (fun pmat ->
+                                  (pr', e) :: pmat)
+                                sub_pmats
+                          | ({ pattern = TPvar x;
+                              typ = _ }, h)
+                            :: pr' ->
+                              Smap.map
+                                (fun pmat ->
+                                  (pr',
+                                  { typ = e.typ;
+                                    expr = TEcasebind (x, h, e)})
+                                  :: pmat)
+                                sub_pmats
+                          | ({ pattern = TPcons (Cint i);
+                              typ = _ }, _)
+                            :: pr' ->
+                              Smap.update
+                                (string_of_int i)
+                                (fun opt ->
+                                  match opt with
+                                    | None ->
+                                      failwith "Shouldn't have happened (key should have been bound already)"
+                                    | Some pmat ->
+                                      Some ((pr', e) :: pmat))
+                                sub_pmats
                           | _ ->
-                            failwith "Shouldn't have happened." )
-                      cstrs pmat in
-                    Smap.iter
-                      (fun cid cpmat ->
-                        let cstr_ar =
-                          match Smap.find cid !gvenv with
-                            | C cstr ->
-                              List.length (cstr.args)
+                            failwith "Shouldn't have happened. (Nothing else than ints should appear here)")
+                      pmat
+                      (List.fold_left
+                        (fun sub_pmats (pr, e) ->
+                          match pr with
+                            | ({ pattern = TPcons (Cint i);
+                                typ = _ }
+                              , _)
+                              :: _ ->
+                                Smap.add (string_of_int i) [] sub_pmats
                             | _ ->
-                              failwith "Shouldn't have happened." in
-                        match cpmat with
-                          | [] ->
-                            raise
+                              sub_pmats)
+                        (Smap.add "_" [] Smap.empty)
+                        pmat) in
+                  let cases =
+                    Smap.mapi
+                      (fun id sub_pmat ->
+                        try pmatrix_to_tcase sub_pmat
+                        with Non_exhaust ps ->
+                          raise
                             (Non_exhaust
-                            ({ loc = dummy_pos;
-                              pattern =
-                                Pcstr
-                                  (cid,
-                                  wildcards_list cstr_ar) } ::
-                              wildcards_list (List.length pr - 1)))
+                              ({ pattern = Pvar id;
+                                loc = dummy_pos }
+                              :: ps)))
+                      sub_pmats in
+                  let otherwise = Smap.find "_" cases in
+                  TCint 
+                    (h,
+                    List.map
+                      (fun (s, c) ->
+                        (int_of_string s, c))
+                      (Smap.to_list (Smap.remove "_" cases)),
+                    otherwise))
+                | t when t = _String ->
+                  (let i = ref 0 in
+                  match
+                    List.exists
+                      (fun (p, _) ->
+                        match p.pattern with
+                          | TPvar _ ->
+                            true
+                          | TPcons (Cstr s) ->
+                            i := max !i (String.length s);
+                            false
                           | _ ->
-                            try test_for_exhaustivity cpmat
+                            false)
+                      (List.map
+                        (fun (pr, e) -> List.hd pr)
+                        pmat) with
+                    | false ->
+                      raise
+                        (Non_exhaust
+                          ({ loc = dummy_pos;
+                            pattern = Pcons (Cstr (String.make (!i + 1) '_')) }
+                          :: wildcard_list (List.length pr - 1)))
+                    | _ ->
+                      let sub_pmats =
+                        List.fold_right
+                          (fun (pr, e) (sub_pmats : pmatrix Smap.t) ->
+                            match pr with
+                              | ({ pattern = TPvar x;
+                                  typ = _ }
+                                , _)
+                                :: pr' when x = "_" ->
+                                  Smap.map
+                                    (fun pmat ->
+                                      (pr', e) :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPvar x;
+                                  typ = _ }, h)
+                                :: pr' ->
+                                  Smap.map
+                                    (fun pmat ->
+                                      (pr',
+                                      { typ = e.typ;
+                                        expr = TEcasebind (x, h, e)})
+                                      :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPcons (Cstr s);
+                                  typ = _ }, _)
+                                :: pr' ->
+                                  Smap.update
+                                    ("\"" ^ s ^ "\"")
+                                    (fun opt ->
+                                      match opt with
+                                        | None ->
+                                          failwith "Shouldn't have happened (key should have been bound already)"
+                                        | Some pmat ->
+                                          Some ((pr', e) :: pmat))
+                                    sub_pmats
+                              | _ ->
+                                failwith "Shouldn't have happened. (Nothing else than strings should appear here)")
+                          pmat
+                          (List.fold_left
+                            (fun sub_pmats (pr, e) ->
+                              match pr with
+                                | ({ pattern = TPcons (Cstr s);
+                                    typ = _ }
+                                  , _)
+                                  :: _ ->
+                                    Smap.add ("\"" ^ s ^ "\"") [] sub_pmats
+                                | _ ->
+                                  sub_pmats)
+                            (Smap.add "_" [] Smap.empty)
+                            pmat) in
+                      let cases =
+                        Smap.mapi
+                          (fun id sub_pmat ->
+                            try pmatrix_to_tcase sub_pmat
                             with Non_exhaust ps ->
-                              let args, ps' = slice cstr_ar ps in
+                              raise
+                                (Non_exhaust
+                                  ({ pattern = Pvar id;
+                                    loc = dummy_pos }
+                                  :: ps)))
+                          sub_pmats in
+                      let otherwise = Smap.find "_" cases in
+                      TCstr (h, Smap.to_list (Smap.remove "_" cases), otherwise))
+                    | t when t = _Boolean ->
+                      let sub_pmats =
+                        List.fold_right
+                          (fun (pr, e) (sub_pmats : pmatrix Smap.t) ->
+                            match pr with
+                              | ({ pattern = TPvar x;
+                                  typ = _ }
+                                , _)
+                                :: pr' when x = "_" ->
+                                  Smap.map
+                                    (fun pmat ->
+                                      (pr', e) :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPvar x;
+                                  typ = _ }, h)
+                                :: pr' ->
+                                  Smap.map
+                                    (fun pmat ->
+                                      (pr',
+                                      { typ = e.typ;
+                                        expr = TEcasebind (x, h, e) })
+                                      :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPcons (Cbool b);
+                                  typ = _ }, _)
+                                :: pr' ->
+                                  Smap.update
+                                    (string_of_bool b)
+                                    (fun opt ->
+                                      match opt with
+                                        | None ->
+                                          failwith "Shouldn't have happened (key should have been bound already)"
+                                        | Some pmat ->
+                                          Some ((pr', e) :: pmat))
+                                    sub_pmats
+                              | _ ->
+                                failwith "Shouldn't have happened. (Nothing else than bools should appear here)")
+                          pmat
+                          (List.fold_left
+                            (fun sub_pmats (pr, e) ->
+                              match pr with
+                                | ({ pattern = TPcons (Cbool b);
+                                    typ = _ }
+                                  , _)
+                                  :: _ ->
+                                    Smap.add (string_of_bool b) [] sub_pmats
+                                | _ ->
+                                  sub_pmats)
+                            (Smap.add "_" [] Smap.empty)
+                            pmat) in
+                      let cases =
+                        (Smap.mapi
+                          (fun id sub_pmat ->
+                            try pmatrix_to_tcase sub_pmat
+                            with Non_exhaust ps ->
+                              raise
+                                (Non_exhaust
+                                  ({ pattern = Pvar id;
+                                    loc = dummy_pos }
+                                  :: ps)))
+                          (Smap.update
+                            "_"
+                            (fun opt ->
+                              match opt with
+                                | None ->
+                                  failwith "Shouldn't have happened here"
+                                | Some [] ->
+                                  None
+                                | _ ->
+                                  opt)
+                            sub_pmats)) in
+                      let is_there_gen = 
+                        (try let _ = Smap.find "_" cases in
+                        true with
+                        Not_found ->
+                          false) in
+                      let are_all_constrs_there = 
+                        (try let _ = Smap.find "true" cases in
+                        true with
+                        Not_found ->
+                          match is_there_gen with
+                            | true ->
+                              false
+                            | _ ->
                               raise
                                 (Non_exhaust
                                   ({ loc = dummy_pos;
-                                    pattern = 
-                                    Pcstr
-                                    (cid, args) } ::
-                                  ps')))
-                      sign;
+                                    pattern = Pcons (Cbool true) }
+                                  :: wildcard_list (List.length pr - 1)))) &&
+                        try let _ = Smap.find "false" cases in
+                          true with
+                        Not_found ->
+                          match is_there_gen with
+                            | true ->
+                              false
+                            | _ ->
+                              raise
+                                (Non_exhaust
+                                  ({ loc = dummy_pos;
+                                    pattern = Pcons (Cbool false) }
+                                  :: wildcard_list (List.length pr - 1))) in
+                      let cases =
+                        match are_all_constrs_there with
+                          | true ->
+                            Smap.add "_" (Smap.find "false" cases) (Smap.remove "false" cases)
+                          | _ ->
+                            cases in
+                      let otherwise = Smap.find "_" cases in
+                      TCbool 
+                        (h,
+                        List.map
+                          (fun (s, c) ->
+                            (bool_of_string s, c))
+                          (Smap.to_list (Smap.remove "_" cases)),
+                        otherwise)
+                | Tcstr (c, targs) ->
+                  (match Smap.find c !gtenv with
+                    | TD data ->
+                      let form_args, cstrs = copy_cstrs data in
+                      unify_typ_lists form_args targs;
+                      let sub_pmats =
+                        List.fold_right
+                          (fun (pr, e) (sub_pmats : pmatrix Smap.t) ->
+                            match pr with
+                              | ({ pattern = TPvar x;
+                                  typ = _ }, h)
+                                :: pr' when x = "_" ->
+                                  Smap.mapi
+                                    (fun cid pmat ->
+                                      match cid with
+                                        | "_" ->
+                                          (pr', e) :: pmat
+                                        | _ ->
+                                          let c = Smap.find cid cstrs in 
+                                            (List.map
+                                              (fun t ->
+                                                ({ pattern = TPvar "_";
+                                                  typ = t },
+                                                []))
+                                              c.args @
+                                              pr',
+                                              e)
+                                            :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPvar x;
+                                  typ = _ }, h)
+                                :: pr' ->
+                                  Smap.mapi
+                                    (fun cid pmat ->
+                                      match cid with
+                                        | "_" ->
+                                          (pr',
+                                          { typ = e.typ;
+                                            expr = TEcasebind (x, h, e)})
+                                          :: pmat
+                                        | _ ->
+                                          let c = Smap.find cid cstrs in 
+                                            (List.mapi
+                                              (fun i t ->
+                                                ({ pattern = TPvar "_";
+                                                  typ = t },
+                                                (i + 1) :: h ))
+                                              c.args @
+                                              pr',
+                                            { typ = e.typ;
+                                              expr = TEcasebind (x, h, e)})
+                                            :: pmat)
+                                    sub_pmats
+                              | ({ pattern = TPcstr (cid, args);
+                                  typ = _ }, _)
+                                :: pr' ->
+                                  let hargs =
+                                    List.mapi
+                                      (fun i arg -> (arg, ((i + 1) :: h : phistory)))
+                                      args in
+                                  Smap.update
+                                    cid
+                                    (fun opt ->
+                                      match opt with
+                                        | None ->
+                                          Some ((hargs @ pr', e) :: [])
+                                        | Some pmat ->
+                                          Some ((hargs @ pr', e) :: pmat))
+                                    sub_pmats
+                              | _ ->
+                                failwith "Shouldn't have happened. (Nothing else than constructed types should appear here)")
+                      pmat
+                      (List.fold_left
+                        (fun sub_pmats (pr, e) ->
+                          match pr with
+                            | ({ pattern = TPcons (Cbool b);
+                                typ = _ }
+                              , _)
+                              :: _ ->
+                                Smap.add (string_of_bool b) [] sub_pmats
+                            | _ ->
+                              sub_pmats)
+                        (Smap.add "_" [] Smap.empty)
+                        pmat) in
+                  let cases =
+                    (Smap.mapi
+                      (fun cid sub_pmat ->
+                        match cid with
+                          | _ when cid = "_" ->
+                            (try pmatrix_to_tcase sub_pmat
+                            with Non_exhaust ps ->
+                              raise
+                                (Non_exhaust
+                                  ({ pattern = Pvar cid;
+                                    loc = dummy_pos }
+                                  :: ps)))
+                          | _ ->
+                            let c = Smap.find cid cstrs in
+                            let n = List.length c.args in
+                            try pmatrix_to_tcase sub_pmat
+                            with Non_exhaust ps ->
+                              let args, rem = slice n ps in
+                              raise
+                                (Non_exhaust
+                                  ({ pattern = Pcstr (cid, args);
+                                    loc = dummy_pos }
+                                  :: rem)))
+                      (Smap.update
+                        "_"
+                        (fun opt ->
+                          match opt with
+                            | None ->
+                              failwith "Shouldn't have happened there"
+                            | Some [] ->
+                              None
+                            | _ ->
+                              opt)
+                        sub_pmats)) in
+                  let is_there_gen = 
+                    (try let _ = Smap.find "_" cases in
+                    true with
+                    Not_found ->
+                      false) in
+                  let are_all_constrs_there =
+                    Smap.for_all
+                      (match is_there_gen with
+                        | true ->
+                          fun cid _ ->
+                            (try let _ = Smap.find cid cases in true with
+                            Not_found ->
+                              false)
+                        | _ ->
+                          fun cid _ ->
+                            let c = Smap.find cid cstrs in
+                            let n = List.length c.args in
+                            (try let _ = Smap.find cid cases in true with
+                            Not_found ->
+                              raise
+                                (Non_exhaust
+                                  ({ loc = dummy_pos;
+                                    pattern = Pcstr (cid, wildcard_list n) }
+                                  :: wildcard_list (List.length pr - 1)))))
+                        cstrs in
+                  (match are_all_constrs_there with
+                    | true ->
+                      let cases_list = Smap.to_list
+                        (let cases' = Smap.remove "_" cases in
+                        match Smap.is_empty cases' with
+                          | true ->
+                            cases
+                          | _ ->
+                            cases') in
+                      let _, otherwise = List.hd cases_list in
+                      TCcstr (h, List.tl cases_list, otherwise)
+                    | _ ->
+                      let otherwise = Smap.find "_" cases in
+                      TCcstr (h, Smap.to_list (Smap.remove "_" cases), otherwise))
                 | _ ->
-                  failwith "Shouldn't have happened.")))
+                  failwith "Shouldn't have happened that way")
+          | _ ->
+            let sub_pmat =
+              List.map
+                (fun (pr, e) ->
+                  match pr with
+                    | ({ pattern = TPvar x;
+                        typ = _ },
+                      h) ::
+                      _
+                      when x = "_" ->
+                      pr', e
+                    | ({ pattern = TPvar x;
+                        typ = _ },
+                      h) ::
+                      _ ->
+                      pr',
+                      { typ = e.typ;
+                        expr = TEcasebind (x, h, e) }
+                    | _ ->
+                      failwith "Shouldn't have happened (a formal type should have neither constructors nor constants)")
+                pmat in
+              pmatrix_to_tcase sub_pmat))
 
+(* Checks pattern matching exhaustivity *)
+                  
 
 (*Typing functions*)
 
@@ -871,7 +1338,7 @@ let rec type_pattern (tenv : tenv_element Smap.t) venv alrdecl (p : loc_pattern)
             { pattern = TPcstr (cid, targs);
               typ = ct }, alrdecl
           with UnificationFailure (t1, t2) ->
-            raise (Typing_error ("Unification failure: could not unify type " ^ str_of_type t1 ^ " and type " ^ str_of_type t2 ^ ".", p.loc)))
+            raise (Typing_error ("Unification failure: could not unify type " ^ str_of_typ t1 ^ " and type " ^ str_of_typ t2 ^ ".", p.loc)))
         | _ ->
           raise (Typing_error ("Unknown constructor " ^ cid ^ ".", p.loc)))
       with Not_found ->
@@ -911,7 +1378,7 @@ let rec type_expr tenv venv (e : loc_expr) =
               typ = ct }
           with 
             | UnificationFailure (t1, t2) ->
-              raise (Typing_error ("Unification failure: could not unify type " ^ str_of_type t1 ^ " and type " ^ str_of_type t2 ^ ".", e.loc))
+              raise (Typing_error ("Unification failure: could not unify type " ^ str_of_typ t1 ^ " and type " ^ str_of_typ t2 ^ ".", e.loc))
             | Invalid_argument _ ->
               let m = List.length args
               and n = List.length c.args in
@@ -934,7 +1401,7 @@ let rec type_expr tenv venv (e : loc_expr) =
               typ = f.ret }
           with 
             | UnificationFailure (t1, t2) ->
-              raise (Typing_error ("Unification failure: could not unify type " ^ str_of_type t1 ^ " with type " ^ str_of_type t2 ^ ".", e.loc))
+              raise (Typing_error ("Unification failure: could not unify type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", e.loc))
             | Invalid_argument _ ->
               let m = List.length args
               and n = List.length f.args in
@@ -945,7 +1412,16 @@ let rec type_expr tenv venv (e : loc_expr) =
       with Not_found ->
         raise (Typing_error ("Unknown value " ^ fid ^ ".", e.loc)))
     | Elocbind (binds, e) ->
-      type_expr tenv (List.fold_left (type_binding tenv) venv binds) e
+      let tbinds, venv =
+        (List.fold_left
+          (fun (tbinds, venv) bind ->
+            let tbind, venv = type_binding tenv venv bind in
+          (tbind :: tbinds, venv))
+        ([], venv)
+        binds) in
+      let te = type_expr tenv venv e in
+      { expr = TElocbind (List.rev tbinds, te);
+        typ = te.typ }
     | Eif (b, e1, e2) ->
       let tb = type_expr tenv venv b
       and te1 = type_expr tenv venv e1
@@ -955,7 +1431,7 @@ let rec type_expr tenv venv (e : loc_expr) =
           { expr = TEif (tb, te1, te2);
             typ = te1.typ }
       with UnificationFailure (t1, t2) ->
-        raise (Typing_error ("Could not match type " ^ str_of_type t1 ^ " with type " ^ str_of_type t2 ^ ".", e.loc)))
+        raise (Typing_error ("Could not match type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", e.loc)))
     | Etyped (e, pt) ->
       let te = type_expr tenv venv e
       and ti = type_purestype tenv venv pt in
@@ -963,33 +1439,36 @@ let rec type_expr tenv venv (e : loc_expr) =
         { expr = te.expr;
           typ = ti }
       with UnificationFailure (t1, t2) ->
-        raise (Typing_error ("Could not match type " ^ str_of_type t1 ^ " with type " ^ str_of_type t2 ^ ".", e.loc)))
+        raise (Typing_error ("Could not match type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", e.loc)))
     | Edo es ->
       let tes = List.map (type_expr tenv venv) es in
       List.iter
         (fun te ->
           try unify te.typ (Tcstr ("Effect", [ Tcstr ("Unit", []) ])) with
-            | UnificationFailure (t1, t2) -> raise (Typing_error ("Could not match type " ^ str_of_type t1 ^ " with type " ^ str_of_type t2 ^ ".", e.loc)))
+            | UnificationFailure (t1, t2) -> raise (Typing_error ("Could not match type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", e.loc)))
         tes;
         { expr = TEdo tes;
           typ = Tcstr ("Effect", [ Tcstr ("Unit", []) ]) }
-    | Ecase (e, brnchs) ->
-      let te = type_expr tenv venv e
-      and tpats =
+    | Ecase (matchede, brnchs) ->
+      let tmatchede = type_expr tenv venv matchede in
+      let tpats =
         List.map
-          (fun (p, _) -> type_pattern tenv venv Smap.empty p)
+          (fun (p, _) ->
+            type_pattern tenv venv Smap.empty p)
           brnchs in
       List.iter
-        (fun ((tp : typ_tpattern), _) -> unify te.typ tp.typ)
+        (fun ((tp : typ_tpattern), _) -> 
+          unify tmatchede.typ tp.typ)
         tpats;
-      let varmapping = List.map
-        (fun (_, varmapping) ->
-          Smap.map
-            (fun t ->
-              V 
-                { typ = clean_up t;
-                  insts = [] })
-            varmapping)
+      let varmappings =
+        List.map
+          (fun (_, varmapping) ->
+            Smap.map
+              (fun t ->
+                V 
+                  { typ = clean_up t;
+                    insts = [] })
+              varmapping)
         tpats in
       let tes = List.map2
         (fun (_, e) varmapping ->
@@ -1000,29 +1479,38 @@ let rec type_expr tenv venv (e : loc_expr) =
               venv
               varmapping)
             e)
-        brnchs varmapping in
+        brnchs
+        varmappings in
       let te = List.hd tes
       and tbrnchs =
         List.map2 
-          (fun (tp, _) te -> (tp, te)) tpats tes in
-      List.iter (fun te' -> unify te.typ te'.typ) (List.tl tes);
-      (try test_for_exhaustivity (convert_to_pmatrix tbrnchs)
+          (fun (tp, _) te ->
+            (tp, te))
+            tpats
+            tes in
+      List.iter
+        (fun te' ->
+          unify te.typ te'.typ)
+        (List.tl tes);
+      try { expr = TEcase (tmatchede, pmatrix_to_tcase (convert_to_pmatrix tbrnchs));
+            typ = te.typ }
       with Non_exhaust ps ->
         (match ps with
           | p :: [] ->
             raise (Typing_error ("A case expression could not be determined to cover all inputs: " ^ Pretty.str_of_pattern p ^ " is not covered.", e.loc))
           | _ ->
-            failwith "Shouldn't have happened."));
-      { expr = TEcase (te, tbrnchs);
-        typ = te.typ }
+            failwith "Shouldn't have happened.")
       
 and type_binding (tenv : tenv_element Smap.t) venv b =
   let Bbind (var, e) = b in
+  let te = (type_expr tenv venv e) in
+  (TBbind (var, te),
   Smap.add
     var
     (V
-      { typ = (type_expr tenv venv e).typ; 
-        insts = []}) venv
+      { typ = te.typ; 
+        insts = []})
+    venv)
 
 let type_defn tenv trettype targtypes defn =
   match defn.decl with
@@ -1046,7 +1534,7 @@ let type_defn tenv trettype targtypes defn =
       let tret = type_expr tenv venv ret in
       (try unify tret.typ trettype
       with UnificationFailure (t1, t2) ->
-        raise (Typing_error ("Could not match type " ^ str_of_type t1 ^ " with type " ^ str_of_type t2 ^ ".", defn.loc)));
+        raise (Typing_error ("Could not match type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", defn.loc)));
       Stack.iter
         (fun (inst, loc) ->
           match is_solved tenv inst with
@@ -1062,7 +1550,7 @@ let type_defn tenv trettype targtypes defn =
           (fun (p : loc_pattern) t ->
             match p.pattern with
               | Pvar v ->
-                { pattern = TPvar v;
+                { var = v;
                   typ = t }
               | _ ->
                 failwith "Shouldn't have happened.")
@@ -1082,7 +1570,7 @@ let type_decl d =
         ({ loc = _ ;
           decl = Dtdecl (fid, vars, impls, argtypes, rettype) },
         defns) ->
-      let defn = compactifies_fun_dec (List.length argtypes) defns in
+      let defn = compactify_fun_dec (List.length argtypes) defns in
       (match defn.decl with
         | Ddefn (_, args, ret) ->
           (let tenv =
@@ -1091,7 +1579,7 @@ let type_decl d =
               (match v with
                 | _ when v <> "_" ->
                   (try let _ = Smap.find v tenv in
-                    raise (Typing_error ("Type argument " ^ v ^ " appears more than once.", rettype.loc))
+                    raise (Typing_error ("Type argument " ^ v ^ " appears more than once.", d.loc))
                   with Not_found ->
                     Smap.add v TV tenv)
                 | _ -> tenv))
@@ -1142,7 +1630,7 @@ let type_decl d =
           (match argtypes with
             | [] ->
               (try let _ = Smap.find fid !gvenv in
-                raise (Typing_error ("Value " ^ fid ^ " has been defined several times.", ret.loc))
+                raise (Typing_error ("Value " ^ fid ^ " has been defined several times.", d.loc))
               with Not_found ->
                 gvenv :=
                   Smap.add
@@ -1153,7 +1641,7 @@ let type_decl d =
                     !gvenv)
             | _ ->
               (try let _ = Smap.find fid !gvenv in
-                raise (Typing_error ("Value " ^ fid ^ " has been defined several times.", ret.loc))
+                raise (Typing_error ("Value " ^ fid ^ " has been defined several times.", d.loc))
               with Not_found ->
                 gvenv :=
                   Smap.add
@@ -1168,40 +1656,95 @@ let type_decl d =
           failwith "Shouldn't have happened.")
     | Ddata (tcid, vars, cstrs) ->
       let tenv = List.fold_left
-      (fun tenv v ->
-        (match v with
-          | _ when v <> "_" ->
-            (try let _ = Smap.find v tenv in
-              raise (Typing_error ("Type argument " ^ v ^ " appears more than once.", d.loc))
-            with Not_found ->
-              Smap.add v TV tenv)
-          | _ ->
-            raise (Typing_error ("_ is not allowed as a type variable name.", d.loc))))
+        (fun tenv v ->
+          (match v with
+            | _ when v <> "_" ->
+              (try let _ = Smap.find v tenv in
+                raise (Typing_error ("Type argument " ^ v ^ " appears more than once.", d.loc))
+              with Not_found ->
+                Smap.add v TV tenv)
+            | _ ->
+              raise (Typing_error ("_ is not allowed as a type variable name.", d.loc))))
         !gtenv
         vars
-      and mapping = Smap.add_seq (List.to_seq (List.map (fun v -> (v, { id = new_id (); def = None })) vars)) Smap.empty in
-      let t = generalise mapping (Tcstr (tcid, List.map (fun v -> Tvar v) vars)) in
+      and mapping =
+        Smap.add_seq
+          (List.to_seq
+            (List.map
+              (fun v ->
+                (v,
+                { id = new_id ();
+                  def = None }))
+              vars))
+          Smap.empty in
+      let t =
+        generalise
+          mapping
+          (Tcstr
+            (tcid,
+            List.map
+              (fun v ->
+                Tvar v)
+              vars)) in
       let cstr_ids = List.fold_left
         (fun cstr_ids (cid, args) ->
-          let targs = List.map (type_purestype tenv !gvenv) args in
           try let _ = Smap.find cid !gvenv in
-            raise (Typing_error ("Declaration for data constructor " ^ cid ^ " conflicts with an existing object of the same name.", d.loc))
+            raise
+              (Typing_error
+                ("Declaration for data constructor " ^ cid ^ " conflicts with an existing object of the same name.",
+                d.loc))
           with Not_found ->
-            gvenv := Smap.add cid
-              (C
-                { args = List.map (generalise mapping) targs;
-                  typ = t })
-              !gvenv;
-            Smap.add cid () cstr_ids) Smap.empty cstrs in
+            try let _ = Smap.find cid cstr_ids in
+              raise
+                (Typing_error
+                  ("Declaration for data constructor " ^ cid ^ " conflicts with an existing object of the same name.",
+                  d.loc))
+            with Not_found ->
+              Smap.add cid () cstr_ids)
+        Smap.empty
+        cstrs in
       (try let _ = Smap.find tcid !gtenv in
-        raise (Typing_error ("Declaration for type " ^ tcid ^ " conflicts with an existing object of the same name.", d.loc))
+        raise
+          (Typing_error
+            ("Declaration for type " ^ tcid ^ " conflicts with an existing object of the same name.",
+            d.loc))
       with Not_found ->
         gtenv :=
-          Smap.add tcid
+          Smap.add
+            tcid
             (TD 
+              { ar = List.length vars;
+                forms =
+                  List.map
+                    (fun var ->
+                      Tform (Smap.find var mapping))
+                    vars;
+                cstrs = cstr_ids})
+            !gtenv);
+      let tenv =
+        Smap.add
+          tcid
+          (TD 
             { ar = List.length vars;
-              cstrs = cstr_ids}) !gtenv;
-      None)
+              forms =
+                List.map
+                  (fun var ->
+                    Tform (Smap.find var mapping))
+                  vars;
+              cstrs = cstr_ids})
+          tenv in
+      List.iter
+        (fun (cid, args) -> 
+          let targs = List.map (type_purestype tenv !gvenv) args in
+          gvenv :=
+            Smap.add
+              cid
+              (C
+              { args = List.map (generalise mapping) targs;
+                typ = t })
+              !gvenv)
+        cstrs;
+      None
     | Dclass (cid, vars, decls) ->
       (try let _ = Smap.find cid !gtenv in
         raise (Typing_error ("Declaration for type class " ^ cid ^ " conflicts with an existing object of the same name.", d.loc))
@@ -1316,24 +1859,70 @@ let type_decl d =
               let Iinst (id, pts) = ded'.instance in
                   { id = id;
                     args = List.map (type_purestype tenv !gvenv) pts } in
+            let gen_args = List.map (generalise mapping) ded.args in
+            List.iter
+              (fun inst_s ->
+                try unify_typ_lists (copy_typ_list gen_args) (copy_typ_list (inst_s.ded));
+                  raise
+                    (Typing_error
+                      ("Type class instances " ^
+                      str_of_inst
+                        { id = iid;
+                          args = inst_s.ded } ^
+                      " and " ^
+                      str_of_inst ded ^
+                      " overlap.",
+                      d.loc))
+                with UnificationFailure _ ->
+                  ())
+              tc.insts;
+            let gen_tc =
+              { ar = tc.ar;
+                forms = tc.forms;
+                methods = tc.methods;
+                insts =
+                  { ded = gen_args;
+                    impl =
+                      List.map
+                      (fun inst ->
+                        { id = inst.id;
+                          args = List.map (generalise mapping) inst.args}) impls } :: tc.insts } in
+            gtenv :=
+              Smap.add
+                iid
+                (TTC
+                  gen_tc)
+                !gtenv;
             let tenv =
+              Smap.add
+                iid
+                (TTC
+                  gen_tc)
+                !gtenv in
+            let (tenv, _) =
               List.fold_left2
-                (fun tenv inst (linst : loc_instance) ->
+                (fun (tenv, is_ded) inst (linst : loc_instance) ->
                   try 
                     match Smap.find inst.id tenv with
                       | TTC tc ->
                         (match tc.ar = List.length inst.args with
                           | true ->
-                            Smap.add inst.id
-                              (TTC
-                                { ar = tc.ar;
-                                  methods = tc.methods;
-                                  forms = tc.forms;
-                                  insts =
-                                    { ded = inst.args;
-                                      impl = [] }
-                                    :: tc.insts })
-                              tenv
+                            ((match is_ded with
+                              | false ->
+                                Smap.add
+                                  inst.id
+                                  (TTC
+                                    { ar = tc.ar;
+                                      methods = tc.methods;
+                                      forms = tc.forms;
+                                      insts =
+                                        { ded = inst.args;
+                                          impl = [] }
+                                        :: tc.insts })
+                                  tenv
+                              | _ ->
+                                tenv),
+                              false)
                           | _ ->
                             let m = List.length inst.args in
                             raise (Typing_error ("Type class " ^ inst.id ^ " expects " ^ string_of_int tc.ar ^ " argument" ^ (if tc.ar > 1 then "s" else "") ^ ", but " ^ string_of_int m ^ (if m > 1 then " were" else " was") ^ " given", linst.loc)))
@@ -1341,7 +1930,7 @@ let type_decl d =
                         raise (Typing_error ("Unknown type class " ^ inst.id ^ ".", linst.loc))
                   with Not_found ->
                     raise (Typing_error ("Unknown type class " ^ inst.id ^ ".", linst.loc)))
-                tenv
+                (tenv, true)
                 (ded :: impls)
                 (ded' :: impls') in
             let (methods, tdefns) =
@@ -1358,10 +1947,10 @@ let type_decl d =
                             raise (Typing_error ("Multiple value declarations exist for value " ^ fid ^ ".", cmpted.loc))
                           | Some (V v) ->
                             Smap.add fid None methods,
-                            type_defn tenv v.typ [] (compactifies_fun_dec 0 defns) :: tdefns
+                            type_defn tenv v.typ [] (compactify_fun_dec 0 defns) :: tdefns
                           | Some (F f) ->
                             Smap.add fid None methods,
-                            type_defn tenv f.ret f.args (compactifies_fun_dec (List.length f.args) defns) :: tdefns
+                            type_defn tenv f.ret f.args (compactify_fun_dec (List.length f.args) defns) :: tdefns
                           | _ ->
                             failwith "Shouldn't have happened.")
                       with Not_found ->
@@ -1384,38 +1973,6 @@ let type_decl d =
                 ()
               | n ->
                 raise (Typing_error ("Member" ^ (if n > 1 then "s " else " ") ^ String.concat ", " not_implemented ^ " of type class " ^ iid ^ (if n > 1 then " have" else " has") ^ " not been implemented", d.loc)));
-            let gen_args = List.map (generalise mapping) ded.args in
-            List.iter
-              (fun inst_s ->
-                try unify_typ_lists (copy_typ_list gen_args) (copy_typ_list (inst_s.ded));
-                  raise
-                    (Typing_error
-                      ("Type class instances " ^
-                      str_of_inst
-                        { id = iid;
-                          args = inst_s.ded } ^
-                      " and " ^
-                      str_of_inst ded ^
-                      " overlap.",
-                      d.loc))
-                with UnificationFailure _ ->
-                  ())
-              tc.insts;
-            gtenv :=
-              Smap.add
-                iid
-                (TTC
-                  { ar = tc.ar;
-                    forms = tc.forms;
-                    methods = tc.methods;
-                    insts =
-                      { ded = gen_args;
-                        impl =
-                          List.map
-                          (fun inst ->
-                            { id = inst.id;
-                              args = List.map (generalise mapping) inst.args}) impls } :: tc.insts })
-                !gtenv;
             Some (TDinst (TIinst (iid, ded.args), tdefns))
           | _ ->
             failwith "Shouldn't have happened.")

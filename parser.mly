@@ -195,43 +195,43 @@ expr:
     { at }
   | e1 = expr; OR; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(||)", e1 :: e2 :: [])} }
+        expr = Eapp ("disj", e1 :: e2 :: [])} }
   | e1 = expr; AND; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(&&)", e1 :: e2 :: [])} }
+        expr = Eapp ("conj", e1 :: e2 :: [])} }
   | e1 = expr; EQ; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(==)", e1 :: e2 :: [])} }
+        expr = Eapp ("eq", e1 :: e2 :: [])} }
   | e1 = expr; NEQ; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(/=)", e1 :: e2 :: [])} }
+        expr = Eapp ("notEq", e1 :: e2 :: [])} }
   | e1 = expr; GEQ; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(>=)", e1 :: e2 :: [])} }
+        expr = Eapp ("greaterThanOrEq", e1 :: e2 :: [])} }
   | e1 = expr; GT; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(>)", e1 :: e2 :: [])} }
+        expr = Eapp ("greaterThan", e1 :: e2 :: [])} }
   | e1 = expr; LEQ; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(<=)", e1 :: e2 :: [])} }
+        expr = Eapp ("lessThanOrEq", e1 :: e2 :: [])} }
   | e1 = expr; LT; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(<)", e1 :: e2 :: [])} }
+        expr = Eapp ("lessThan", e1 :: e2 :: [])} }
   | e1 = expr; ADD; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(+)", e1 :: e2 :: [])} }
+        expr = Eapp ("add", e1 :: e2 :: [])} }
   | e1 = expr; SUB; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(-)", e1 :: e2 :: [])} }
+        expr = Eapp ("sub", e1 :: e2 :: [])} }
   | e1 = expr; CONC; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(<>)", e1 :: e2 :: [])} }
+        expr = Eapp ("append", e1 :: e2 :: [])} }
   | e1 = expr; MUL; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(*)", e1 :: e2 :: [])} }
+        expr = Eapp ("mul", e1 :: e2 :: [])} }
   | e1 = expr; DIV; e2 = expr
     { { loc = localisation $startpos;
-        expr = Eapp ("(/)", e1 :: e2 :: [])} }
+        expr = Eapp ("div", e1 :: e2 :: [])} }
   | SUB; e = expr
     { { loc = localisation $startpos;
         expr = Eapp ("negate", e :: []) } }
