@@ -389,7 +389,9 @@ and func =
 
 type inst_scheme =
   { ded : typ list;
-    impl : inst list }     
+    impl : inst list;
+    is_loc : bool;
+    id : int }     
 
 type tpclass =
   { ar : int;
@@ -468,22 +470,34 @@ let gtenv =
               forms = [ Tform def_form ]; 
               insts = 
                 [ { ded = [ _Unit ];
-                    impl = [] };
+                    impl = [];
+                    is_loc = false;
+                    id = 0 };
                   { ded = [ _Boolean ];
-                    impl = [] };
+                    impl = [];
+                    is_loc = false;
+                    id = 1 };
                   { ded = [ _Int ];
-                    impl = [] };
+                    impl = [];
+                    is_loc = false;
+                    id = 2 };
                   { ded = [ _String ];
-                    impl = [] } ] });
+                    impl = [];
+                    is_loc = false;
+                    id = 3 } ] });
             ("Show", TTC
             { ar = 1;
               methods = [ "show" ];
               forms = [ Tform def_form ]; 
               insts = 
                 [ { ded = [ _Boolean ];
-                    impl = [] };
+                    impl = [];
+                    is_loc = false;
+                    id = 4 };
                   { ded = [ _Int ];
-                    impl = [] } ] }) ])
+                    impl = [];
+                    is_loc = false;
+                    id = 5 } ] }) ])
       gte)
 
 let gvenv =
@@ -585,6 +599,10 @@ let gvenv =
 type phistory =
   int list
 
+type instance_deriv =
+  | Loc of int
+  | Schem of int * (instance_deriv list)
+
 type tinstance =
   | TIinst of ident * (typ list)
 
@@ -607,8 +625,8 @@ type typ_texpr =
 
 and texpr =
   | TEcons of constant
-  | TEvar of ident
-  | TEapp of ident * (typ_texpr list)
+  | TEvar of ident * (instance_deriv option ref list)
+  | TEapp of ident * (typ_texpr list) * (instance_deriv option ref list)
   | TEcstr of ident * (typ_texpr list)
   | TEif of typ_texpr * typ_texpr * typ_texpr
   | TEdo of typ_texpr list
@@ -628,13 +646,13 @@ and tcase =
 
 and tdecl =
   | TDdefn of ident * (typ_arg list) * typ_texpr
-  | TDinst of tinstance * (tdecl list)
+  | TDinst of int * tinstance * (tdecl list)
     
 type tprogram = tdecl list
 
 (* Instance resolution checks *)
 
-let str_of_inst inst =
+let str_of_inst (inst : inst) =
   let rec aux t =
     match head t with
       | Tvar v ->
@@ -652,7 +670,7 @@ let copy_var (v : var) =
   { typ = type_copy_aux mapping v.typ;
     insts =
       List.map
-        (fun inst ->
+        (fun (inst : inst) ->
           { id = inst.id;
             args = List.map (type_copy_aux mapping) inst.args })
         v.insts }
@@ -663,7 +681,7 @@ let copy_func (f : func) =
     args = List.map (type_copy_aux mapping) f.args;
     insts =
       List.map
-        (fun inst ->
+        (fun (inst : inst) ->
           { id = inst.id;
             args = List.map (type_copy_aux mapping) inst.args })
         f.insts }
@@ -673,10 +691,12 @@ let copy_inst_scheme inst_s =
   { ded = List.map (type_copy_aux mapping) inst_s.ded;
     impl =
       List.map
-        (fun inst ->
+        (fun (inst : inst) ->
           { id = inst.id;
-            args = List.map (type_copy_aux mapping) inst.args})
-        inst_s.impl }
+            args = List.map (type_copy_aux mapping) inst.args })
+        inst_s.impl;
+    is_loc = inst_s.is_loc;
+    id = inst_s.id }
 
 let copy_cstrs (data : tdata) =
   let mapping = ref Imap.empty in
@@ -705,7 +725,7 @@ let copy_methods tpclass =
                 { typ = type_copy_aux mapping v.typ;
                   insts =
                     List.map
-                      (fun inst ->
+                      (fun (inst : inst) ->
                         { id = inst.id;
                           args = List.map (type_copy_aux mapping) inst.args })
                       v.insts })
@@ -716,7 +736,7 @@ let copy_methods tpclass =
                   args = List.map (type_copy_aux mapping) f.args;
                   insts =
                     List.map
-                      (fun inst ->
+                      (fun (inst : inst) ->
                         { id = inst.id;
                           args = List.map (type_copy_aux mapping) inst.args })
                       f.insts })
@@ -728,20 +748,54 @@ let copy_methods tpclass =
 
 (* These functions are used to obtain copies of elements of typing environments, with different formal type variables *)    
 
-let rec is_solved tenv inst =
+let rec solve tenv (inst : inst) =
   match Smap.find inst.id tenv with
     | TTC tc ->
-      List.exists
-        (fun inst_s ->
-            let inst_s = copy_inst_scheme inst_s in
-              is_subst_typ_lists inst.args inst_s.ded && List.for_all (is_solved tenv) inst_s.impl)
+      List.fold_left
+        (fun deriv inst_s ->
+          match deriv with
+            | None ->
+              let inst_s = copy_inst_scheme inst_s in
+              (match is_subst_typ_lists inst.args inst_s.ded with
+                | true ->
+                  let impl_derivs =
+                    List.map (solve tenv) inst_s.impl in
+                  (match
+                    List.exists
+                      (fun deriv ->
+                        deriv = None)
+                      impl_derivs with
+                    | true ->
+                      None
+                    | _ ->
+                      (match inst_s.is_loc with
+                        | true ->
+                          Some
+                            (Loc inst_s.id)
+                        | _ ->
+                          Some
+                            (Schem
+                              (inst_s.id,
+                              List.map
+                                (fun deriv_opt ->
+                                  match deriv_opt with
+                                    | Some deriv ->
+                                      deriv
+                                    | _ ->
+                                      failwith "Shouldn't have happened.")
+                                impl_derivs))))
+                | _ ->
+                  None)
+            | _ ->
+              deriv)
+        None
         tc.insts
     | _ ->
       failwith ("Shouldn't have happened.")
 
 (* Checks if an instance is solved *)      
 
-let (to_be_checked : (inst * loc) Stack.t) = Stack.create ()
+let (to_be_checked : (inst * loc * (instance_deriv option ref)) Stack.t) = Stack.create ()
 
 (* Stack of instances whose solvabilty is to be checked once their types are determined *)
 
@@ -1157,11 +1211,11 @@ let rec pmatrix_to_tcase (pmat : pmatrix) =
                       (List.fold_left
                         (fun sub_pmats (pr, e) ->
                           match pr with
-                            | ({ pattern = TPcons (Cbool b);
+                            | ({ pattern = TPcstr (cid, _);
                                 typ = _ }
                               , _)
                               :: _ ->
-                                Smap.add (string_of_bool b) [] sub_pmats
+                                Smap.add (cid) [] sub_pmats
                             | _ ->
                               sub_pmats)
                         (Smap.add "_" [] Smap.empty)
@@ -1240,7 +1294,7 @@ let rec pmatrix_to_tcase (pmat : pmatrix) =
                       let otherwise = Smap.find "_" cases in
                       TCcstr (h, Smap.to_list (Smap.remove "_" cases), otherwise))
                 | _ ->
-                  failwith "Shouldn't have happened that way")
+                  failwith "Shouldn't have happened")
           | _ ->
             let sub_pmat =
               List.map
@@ -1268,6 +1322,14 @@ let rec pmatrix_to_tcase (pmat : pmatrix) =
                   
 
 (*Typing functions*)
+
+let c_insts_s =
+  ref 6
+
+let new_inst_id () =
+  let id = !c_insts_s in
+  incr c_insts_s;
+  id  
 
 let rec type_purestype tenv (venv : venv_element Smap.t) pt =
   match pt.purstype with
@@ -1350,54 +1412,62 @@ let rec type_expr tenv venv (e : loc_expr) =
       { expr = TEcons c;
         typ = type_cons c }
     | Evar v ->
-      (try (match Smap.find v venv with
-        | V x ->
-          let x = copy_var x in
-          List.iter 
-            (fun inst ->
-              Stack.push (inst, e.loc) to_be_checked)
-            x.insts; 
-          { expr = TEvar v;
-            typ = x.typ }
-        | F f ->
-            let n = List.length f.args in
-            raise (Typing_error ("Value " ^ v ^ " expects " ^ string_of_int n ^ " argument" ^ (if n > 1 then "s" else "") ^ ", but 0 was given.", e.loc))
-        | _ ->
-          failwith "Shouldn't have happened.")
+      (try
+        (match Smap.find v venv with
+          | V x ->
+            let x = copy_var x in
+            let derivations =
+            List.map
+              (fun inst ->
+                let (deriv : instance_deriv option ref) = ref None in
+                Stack.push (inst, e.loc, deriv) to_be_checked;
+                deriv)
+              x.insts in
+            { expr = TEvar (v, derivations);
+              typ = x.typ }
+          | F f ->
+              let n = List.length f.args in
+              raise (Typing_error ("Value " ^ v ^ " expects " ^ string_of_int n ^ " argument" ^ (if n > 1 then "s" else "") ^ ", but 0 was given.", e.loc))
+          | _ ->
+            failwith "Shouldn't have happened.")
       with Not_found ->
         raise (Typing_error ("Unknown value " ^ v ^ ".", e.loc)))
     | Ecstr (cid, args) ->
-      (try (match Smap.find cid venv with
-        | C c -> 
-          let targs = List.map (type_expr tenv venv) args 
-          and l = copy_typ_list (c.typ :: c.args) in
-          let ct = List.hd l
-          and cargs = List.tl l in
-          (try unify_typ_lists cargs (List.map (fun e -> e.typ) targs);
-            { expr = TEcstr (cid, targs);
-              typ = ct }
-          with 
-            | UnificationFailure (t1, t2) ->
-              raise (Typing_error ("Unification failure: could not unify type " ^ str_of_typ t1 ^ " and type " ^ str_of_typ t2 ^ ".", e.loc))
-            | Invalid_argument _ ->
-              let m = List.length args
-              and n = List.length c.args in
-              raise (Typing_error ("Constructor " ^ cid ^ " expects " ^ string_of_int n ^ " argument" ^ (if n > 1 then "s" else "") ^ ", but " ^ string_of_int m ^ (if m > 1 then " were" else " was") ^ " given.", e.loc)))
-        | _ ->
-          raise (Typing_error ("Unknown constructor " ^ cid ^ ".", e.loc)))
-        with Not_found ->
-          raise (Typing_error ("Unknown constructor " ^ cid ^ ".", e.loc)))
+      (try
+        (match Smap.find cid venv with
+          | C c -> 
+            let targs = List.map (type_expr tenv venv) args 
+            and l = copy_typ_list (c.typ :: c.args) in
+            let ct = List.hd l
+            and cargs = List.tl l in
+            (try unify_typ_lists cargs (List.map (fun e -> e.typ) targs);
+              { expr = TEcstr (cid, targs);
+                typ = ct }
+            with 
+              | UnificationFailure (t1, t2) ->
+                raise (Typing_error ("Unification failure: could not unify type " ^ str_of_typ t1 ^ " and type " ^ str_of_typ t2 ^ ".", e.loc))
+              | Invalid_argument _ ->
+                let m = List.length args
+                and n = List.length c.args in
+                raise (Typing_error ("Constructor " ^ cid ^ " expects " ^ string_of_int n ^ " argument" ^ (if n > 1 then "s" else "") ^ ", but " ^ string_of_int m ^ (if m > 1 then " were" else " was") ^ " given.", e.loc)))
+          | _ ->
+            raise (Typing_error ("Unknown constructor " ^ cid ^ ".", e.loc)))
+          with Not_found ->
+            raise (Typing_error ("Unknown constructor " ^ cid ^ ".", e.loc)))
     | Eapp (fid, args) ->
       (try (match Smap.find fid venv with
-        | F f -> 
+        | F f ->
           let targs = List.map (type_expr tenv venv) args
           and f = copy_func f in
-          List.iter 
+          let derivs =
+          List.map 
             (fun inst ->
-              Stack.push (inst, e.loc) to_be_checked)
-            f.insts;
+              let (deriv : instance_deriv option ref) = ref None in
+              Stack.push (inst, e.loc, deriv) to_be_checked;
+              deriv)
+            f.insts in
           (try unify_typ_lists f.args (List.map (fun e -> e.typ) targs);
-            { expr = TEapp (fid, targs);
+            { expr = TEapp (fid, targs, derivs);
               typ = f.ret }
           with 
             | UnificationFailure (t1, t2) ->
@@ -1536,10 +1606,10 @@ let type_defn tenv trettype targtypes defn =
       with UnificationFailure (t1, t2) ->
         raise (Typing_error ("Could not match type " ^ str_of_typ t1 ^ " with type " ^ str_of_typ t2 ^ ".", defn.loc)));
       Stack.iter
-        (fun (inst, loc) ->
-          match is_solved tenv inst with
-            | true ->
-              ()
+        (fun (inst, loc, deriv_ref) ->
+          match solve tenv inst with
+            | Some deriv ->
+              deriv_ref := Some deriv
             | _ ->
               raise (Typing_error ("No type class instance was found for " ^ str_of_inst inst ^ ".", loc)))
         to_be_checked;
@@ -1595,25 +1665,32 @@ let type_decl d =
                       def = None }))
                   vars))
             Smap.empty in
-          let tenv =
+          let tenv, insts, _ =
             List.fold_left
-              (fun tenv (linst : loc_instance) ->
+              (fun (tenv, insts , i) (linst : loc_instance) ->
                 let Iinst (id, pts) = linst.instance in
                 try 
                   match Smap.find id tenv with
                     | TTC tc ->
                       (match tc.ar = List.length pts with
                         | true ->
-                          Smap.add id
+                          let tpts = List.map (type_purestype tenv !gvenv) pts in
+                          (Smap.add id
                             (TTC
                               { ar = tc.ar;
                                 methods = tc.methods;
                                 forms = tc.forms;
                                 insts =
-                                  { ded = List.map (type_purestype tenv !gvenv) pts;
-                                    impl = [] }
+                                  { ded = tpts;
+                                    impl = [];
+                                    is_loc = true;
+                                    id = i }
                                   :: tc.insts })
-                            tenv
+                            tenv,
+                          { id = id;
+                            args = tpts } ::
+                          insts,
+                          i + 1)
                         | _ ->
                           let m = List.length pts in
                           raise (Typing_error ("Type class " ^ id ^ " expects " ^ string_of_int tc.ar ^ " argument" ^ (if tc.ar > 1 then "s" else "") ^ ", but " ^ string_of_int m ^ (if m > 1 then " were" else " was") ^ " given", linst.loc)))
@@ -1621,7 +1698,7 @@ let type_decl d =
                       raise (Typing_error ("Unknown instance " ^ id ^ ".", linst.loc))
                 with Not_found ->
                   raise (Typing_error ("Unknown instance " ^ id ^ ".", linst.loc)))
-              tenv
+              (tenv, [], 0)
               impls in
           let targtypes = List.map
             (fun pt -> clean_up (type_purestype tenv !gvenv pt))
@@ -1637,7 +1714,13 @@ let type_decl d =
                     fid
                     (V
                       { typ = generalise mapping trettype;
-                        insts = [] })
+                        insts =
+                          List.rev
+                            (List.map
+                              (fun (inst : inst) ->
+                                { id = inst.id;
+                                  args = List.map (generalise mapping) inst.args })
+                              insts) })
                     !gvenv)
             | _ ->
               (try let _ = Smap.find fid !gvenv in
@@ -1649,7 +1732,13 @@ let type_decl d =
                     (F 
                       { args = List.map (generalise mapping) targtypes;
                         ret = generalise mapping trettype;
-                        insts = [] })
+                        insts =
+                          List.rev
+                              (List.map
+                                (fun (inst : inst) ->
+                                  { id = inst.id;
+                                    args = List.map (generalise mapping) inst.args })
+                                insts) })
                     !gvenv));
         Some (type_defn tenv trettype targtypes defn))    
         | _ ->
@@ -1876,6 +1965,7 @@ let type_decl d =
                 with UnificationFailure _ ->
                   ())
               tc.insts;
+            let id = new_inst_id () in
             let gen_tc =
               { ar = tc.ar;
                 forms = tc.forms;
@@ -1884,9 +1974,13 @@ let type_decl d =
                   { ded = gen_args;
                     impl =
                       List.map
-                      (fun inst ->
-                        { id = inst.id;
-                          args = List.map (generalise mapping) inst.args}) impls } :: tc.insts } in
+                        (fun (inst : inst) ->
+                          { id = inst.id;
+                            args = List.map (generalise mapping) inst.args })
+                        impls;
+                    is_loc = false;
+                    id = id} ::
+                      tc.insts; } in
             gtenv :=
               Smap.add
                 iid
@@ -1899,9 +1993,9 @@ let type_decl d =
                 (TTC
                   gen_tc)
                 !gtenv in
-            let (tenv, _) =
+            let (tenv, _, _) =
               List.fold_left2
-                (fun (tenv, is_ded) inst (linst : loc_instance) ->
+                (fun (tenv, is_ded, i) (inst : inst) (linst : loc_instance) ->
                   try 
                     match Smap.find inst.id tenv with
                       | TTC tc ->
@@ -1917,12 +2011,15 @@ let type_decl d =
                                       forms = tc.forms;
                                       insts =
                                         { ded = inst.args;
-                                          impl = [] }
+                                          impl = [];
+                                          is_loc = true;
+                                          id = i }
                                         :: tc.insts })
                                   tenv
                               | _ ->
                                 tenv),
-                              false)
+                              false,
+                              i + 1)
                           | _ ->
                             let m = List.length inst.args in
                             raise (Typing_error ("Type class " ^ inst.id ^ " expects " ^ string_of_int tc.ar ^ " argument" ^ (if tc.ar > 1 then "s" else "") ^ ", but " ^ string_of_int m ^ (if m > 1 then " were" else " was") ^ " given", linst.loc)))
@@ -1930,7 +2027,7 @@ let type_decl d =
                         raise (Typing_error ("Unknown type class " ^ inst.id ^ ".", linst.loc))
                   with Not_found ->
                     raise (Typing_error ("Unknown type class " ^ inst.id ^ ".", linst.loc)))
-                (tenv, true)
+                (tenv, true, 0)
                 (ded :: impls)
                 (ded' :: impls') in
             let (methods, tdefns) =
@@ -1973,7 +2070,7 @@ let type_decl d =
                 ()
               | n ->
                 raise (Typing_error ("Member" ^ (if n > 1 then "s " else " ") ^ String.concat ", " not_implemented ^ " of type class " ^ iid ^ (if n > 1 then " have" else " has") ^ " not been implemented", d.loc)));
-            Some (TDinst (TIinst (iid, ded.args), tdefns))
+            Some (TDinst (id, TIinst (iid, ded.args), tdefns))
           | _ ->
             failwith "Shouldn't have happened.")
           with Not_found ->

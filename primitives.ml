@@ -1,5 +1,5 @@
 let primitives =
-  ".len:
+".len:
   xorq %rax, %rax
   jmp .loop_len
 .loop_len:
@@ -40,29 +40,32 @@ not:
   movq 8(%rsp), %rax
   notb %al
   ret
+.set_true:
+  movb $255, %al
+  ret
 lessThanOrEq:
   xorq %rax, %rax
   movq 16(%rsp), %rbx
   cmpq %rbx, 8(%rsp)
-  setle %al
+  jle .set_true
   ret
 lessThan:
   xorq %rax, %rax
   movq 16(%rsp), %rbx
   cmpq %rbx, 8(%rsp)
-  setl %al
+  jl .set_true
   ret
 greaterThanOrEq:
   xorq %rax, %rax
   movq 16(%rsp), %rbx
   cmpq %rbx, 8(%rsp)
-  setge %al
+  jge .set_true
   ret
 greaterThan:
   xorq %rax, %rax
   movq 16(%rsp), %rbx
   cmpq %rbx, 8(%rsp)
-  setg %al
+  jg .set_true
   ret
 negate:
   movq 8(%rsp), %rax
@@ -187,7 +190,16 @@ pure:
 unit:
   xorq %rax, %rax
   ret
-show:
+.meth_4_0:
+  movq 8(%rsp), %rax
+  cmpq $0, %rax
+  je .show_false
+  leaq .true, %rax
+  ret
+  .show_false:
+    leaq .false, %rax
+    ret
+.meth_5_0:
   movq 8(%rsp), %rax
   call .show_int
   ret
@@ -256,23 +268,60 @@ show:
     movb $0, (%rbx)
     leave
     ret
-.eq_int:
+.is:
   movq 24(%rsp), %rax
   cmpq 16(%rsp), %rax
-  je .eq_int_eq
+  je .is_eq
   xorq %rax, %rax
   ret
-  .eq_int_eq:
+  .is_eq:
     movq $255, %rax
     ret
-eq:
-  call .eq_int
+.meth_0_0:
+  movq $255, %rax
+  ret
+.meth_1_0:
+  call .is
+  ret
+.meth_2_0:
+  call .is
+  ret
+.meth_3_0:
+  movq 8(%rsp), %rax
+  movq 16(%rsp), %rbx
+  call .cmp_str_loop
+  je .is_eq
+  xorq %rax, %rax
   ret
 notEq:
-  pushq 16(%rsp)
-  pushq 16(%rsp)
-  call eq
+  movq 24(%rsp), %rax
+  pushq %rax
+  pushq 24(%rsp)
+  pushq 24(%rsp)
+  movq (%rax), %rax
+  call *(%rax)
   notb %al
-  addq $16, %rsp
+  addq $24, %rsp
   ret
+"
+
+let primitive_data =
+".fmt:
+  .string \"%s\\n\"
+.true:
+  .string \"true\"
+.false:
+  .string \"false\"
+.inst_0:
+  .quad .meth_0_0
+.inst_1:
+  .quad .meth_1_0
+.inst_2:
+  .quad .meth_2_0
+.inst_3:
+  .quad .meth_3_0
+.inst_4:
+  .quad .meth_4_0
+.inst_5:
+  .quad .meth_5_0
 "

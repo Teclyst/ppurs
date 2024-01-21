@@ -6,42 +6,37 @@ open Primitives
 
 type local_env = int Smap.t
 
-let popn n = addq (imm n) !%rsp
-let pushn n = subq (imm n) !%rsp
+let popn n =
+  addq (imm n) !%rsp
+let pushn n =
+  subq (imm n) !%rsp
 
 (* New Asts, with local variables replaced by their positions *)
-
-type typ_carg =
-  { var : int;
-    typ : typ }
 
 type ccase =
   | CCcstr of phistory * (int * ccase) list * ccase
   | CCimm of phistory * (int * ccase) list * ccase
   | CCstr of phistory * (int * ccase) list * ccase
-  | CCret of typ_cexpr    
-
-and typ_cexpr =
-  { expr : cexpr;
-    typ : typ }
+  | CCret of cexpr
 
 and cexpr =
   | CEcons of constant
   | CElvar of int
-  | CEval of ident * (typ_cexpr list)
-  | CEcstr of int * (typ_cexpr list)
-  | CEif of typ_cexpr * typ_cexpr * typ_cexpr
-  | CEdo of typ_cexpr list
-  | CElocbind of cbinding list * typ_cexpr
-  | CEcasebind of int * phistory * typ_cexpr
-  | CEcase of typ_cexpr * ccase
+  | CEval of ident * (cexpr list) * (instance_deriv list)
+  | CEmeth of int * (cexpr list) * (instance_deriv list)
+  | CEcstr of int * (cexpr list)
+  | CEif of cexpr * cexpr * cexpr
+  | CEdo of cexpr list
+  | CElocbind of cbinding list * cexpr
+  | CEcasebind of int * phistory * cexpr
+  | CEcase of cexpr * ccase
 
 and cbinding =
-  | CBbind of int * typ_cexpr
+  | CBbind of int * cexpr
 
 and cdecl =
-  | CDdefn of ident * (typ_carg list) * typ_cexpr * int
-  | CDinst of tinstance * (cdecl list)
+  | CDdefn of ident * (int list) * cexpr * int
+  | CDinst of int * (cdecl list)
     
 type cprogram = cdecl list
 
@@ -51,13 +46,17 @@ type cprogram = cdecl list
 let () =
   id_ref := 0
 
-let c_str = ref 0
+let c_str =
+  ref 0
 
-let cstr_ids = ref Smap.empty
+let cstr_ids =
+  ref Smap.empty
 
-let str_csts_ids = ref Smap.empty
+let str_csts_ids =
+  ref Smap.empty
 
-
+let methods =
+  ref Smap.empty
 
 (* Ast converting functions *)
 
@@ -122,17 +121,29 @@ let rec alloc_case (env : local_env) fpcur (cases : tcase) =
 and alloc_expr (env : local_env) fpcur (e : typ_texpr) =
   match e.expr with
     | TEcons c ->
-      { expr = CEcons c;
-        typ = e.typ },
+      CEcons c,
       fpcur
-    | TEvar v ->
-      { expr =
-        (try CElvar (Smap.find v env)
+    | TEvar (v, derivs) ->
+      (try CElvar (Smap.find v env)
+      with Not_found ->
+        try
+          CEmeth
+            (Smap.find v !methods,
+            [],
+            List.filter_map
+              (fun x ->
+                !x)
+              derivs)
         with Not_found ->
-          CEval (v, []));
-        typ = e.typ },
+          CEval
+            (v,
+            [],
+            List.filter_map
+              (fun x ->
+                !x)
+              derivs)),
       fpcur
-    | TEapp (f, args) ->
+    | TEapp (f, args, derivs) ->
       let cargs, s =
       List.fold_right
         (fun arg (cargs, s) ->
@@ -141,8 +152,22 @@ and alloc_expr (env : local_env) fpcur (e : typ_texpr) =
         args
         ([],
         fpcur) in
-      { expr = CEval (f, cargs);
-        typ = e.typ },
+      (try
+        CEmeth
+          (Smap.find f !methods,
+          cargs,
+          List.filter_map
+            (fun x ->
+              !x)
+            derivs)
+      with Not_found ->
+        CEval
+          (f,
+          cargs,
+          List.filter_map
+            (fun x ->
+              !x)
+            derivs)),
       s
     | TEcstr (c, args) ->
       let cargs, s =
@@ -153,15 +178,13 @@ and alloc_expr (env : local_env) fpcur (e : typ_texpr) =
         args
         ([],
         fpcur) in
-      { expr = CEcstr (Smap.find c !cstr_ids, cargs);
-        typ = e.typ },
+      CEcstr (Smap.find c !cstr_ids, cargs),
       s
     | TEif (b, e1, e2) ->
       let cb, sb = alloc_expr env fpcur b
       and ce1, s1 = alloc_expr env fpcur e1
       and ce2, s2 = alloc_expr env fpcur e2 in
-      { expr = CEif (cb, ce1, ce2);
-        typ = e.typ },
+      CEif (cb, ce1, ce2),
       max sb (max s1 s2)
     | TEdo es ->
       let ces, s =
@@ -171,8 +194,7 @@ and alloc_expr (env : local_env) fpcur (e : typ_texpr) =
             ce :: ces, max s s')
         es
         ([], 0) in
-        { expr = CEdo ces;
-        typ = e.typ },
+        CEdo ces,
       s
     | TElocbind (binds, e) ->
       let env, fpcur, cbinds, s =
@@ -183,19 +205,16 @@ and alloc_expr (env : local_env) fpcur (e : typ_texpr) =
           (env, fpcur, [], 0)
           binds in
       let ce, s' = alloc_expr env fpcur e in
-      { expr = CElocbind (List.rev cbinds, ce);
-        typ = e.typ },
+      CElocbind (List.rev cbinds, ce),
       max s s'
     | TEcasebind (var, h, e) ->
       let ce, s = alloc_expr (Smap.add var (- fpcur) env) (fpcur + 8) e in
-      { expr = CEcasebind (- fpcur, h, ce);
-        typ = e.typ },
+      CEcasebind (- fpcur, h, ce),
         s
     | TEcase (e, case) ->
       let ce, s = alloc_expr env fpcur e in
       let ccase, s' = alloc_case env fpcur case in
-      { expr = CEcase (ce, ccase);
-        typ = e.typ },
+      CEcase (ce, ccase),
       max s s'     
 
 and alloc_binding env fpcur bind =
@@ -210,20 +229,19 @@ let rec alloc_decl d =
       let cargs =
         List.mapi
           (fun i (arg : typ_arg) ->
-            { var = 16 + 8 * i;
-              typ = arg.typ })
+            16 + 8 * i)
           args in
       let env =
         List.fold_left2
-          (fun env (arg : typ_arg) (carg : typ_carg) ->
-            Smap.add arg.var carg.var env)
+          (fun env (arg : typ_arg) carg ->
+            Smap.add arg.var carg env)
           Smap.empty
           args
           cargs in
       let ce, s = alloc_expr env 8 e in
       CDdefn (fid, cargs, ce, s)
-    | TDinst (i, defns) ->
-      CDinst (i, List.map alloc_decl defns)
+    | TDinst (id, inst, defns) ->
+      CDinst (id, List.map alloc_decl defns)
 
 let alloc_program p =
   List.map alloc_decl p
@@ -264,13 +282,23 @@ let add_string_constants ids =
     ids
     nop
 
-let c_ite = ref 0
+let c_ite =
+  ref 0
 
-let c_conj = ref 0
+let c_conj =
+  ref 0
 
-let c_disj = ref 0
+let c_disj =
+  ref 0
 
-let c_cases = ref 0
+let c_cases =
+  ref 0
+
+let vars_in_cur =
+  ref 0
+
+let is_in_inst =
+  ref false
 
 let compile_history h =
   List.fold_right
@@ -280,13 +308,42 @@ let compile_history h =
     h
     nop
 
+let rec compile_deriv deriv =
+  match deriv with
+    | Loc i ->
+      (match !is_in_inst with
+        | false ->
+          movq (ind ~ofs:(16 + !vars_in_cur * 8 + i * 8) rbp) !%rax
+        | _ ->
+          movq (ind ~ofs:(16 + !vars_in_cur * 8) rbp) !%rax ++
+          movq (ind ~ofs:(i * 8) rax) !%rax)
+    | Schem (i, impls) ->
+      movq (imm (List.length impls + 1)) !%rdi ++
+      call ".aligned_malloc" ++
+      movq !%rax !%rbx ++
+      leaq (lab (".inst_" ^ string_of_int i)) rax ++
+      movq !%rax (ind rbx) ++
+      let (_, push_impls) =
+        List.fold_left
+          (fun (i, txt) deriv ->
+            i + 1,
+            txt ++
+            pushq !%rbx ++
+            compile_deriv deriv ++
+            popq rbx ++
+            movq !%rax (ind ~ofs:(8 * i) rbx))
+          (1, nop)
+          impls in
+      push_impls ++
+      movq !%rbx !%rax
+
 let rec compile_expr e =
-  match e.expr with
+  match e with
     | CEcons c ->
       compile_cons c
     | CElvar pos ->
       pushq (ind ~ofs:pos rbp)
-    | CEval (f, [b1; b2]) when f = "conj" ->
+    | CEval (f, [b1; b2], []) when f = "conj" ->
       compile_expr b1 ++
       popq rax ++
       cmpq (imm 0) !%rax ++
@@ -297,7 +354,7 @@ let rec compile_expr e =
       pushq !%rax ++
       label (".conj_continue_" ^ string_of_int (!c_conj)) ++
       (incr c_conj; nop)
-    | CEval (f, [b1; b2]) when f = "disj" ->
+    | CEval (f, [b1; b2], []) when f = "disj" ->
       compile_expr b1 ++
       popq rax ++
       cmpq (imm 0) !%rax ++
@@ -308,14 +365,41 @@ let rec compile_expr e =
       pushq !%rax ++
       label (".disj_continue_" ^ string_of_int (!c_disj)) ++
       (incr c_disj; nop)
-    | CEval (f, args) ->
+    | CEval (f, args, derivs) ->
       List.fold_left
-        (fun txt e -> compile_expr e ++ txt)
+        (fun txt deriv ->
+          compile_deriv deriv ++
+          pushq !%rax ++
+          txt)
+        nop
+        derivs ++
+      List.fold_left
+        (fun txt e ->
+          compile_expr e ++
+          txt)
         nop
         args ++
       call f ++
-      popn (8 * (List.length args)) ++
+      popn (8 * (List.length args + List.length derivs)) ++
       pushq !%rax
+    | CEmeth (id, args, inst) ->
+      (match inst with
+        | [ inst ] ->
+            compile_deriv inst ++
+            pushq !%rax ++
+            List.fold_left
+              (fun txt e ->
+                compile_expr e ++
+                txt)
+              nop
+              args ++
+            movq (ind ~ofs:(8 * List.length args) rsp) !%rax ++
+            movq (ind rax) !%rax ++
+            call_star (ind ~ofs:(8 * id) rax) ++
+            popn (8 * (List.length args + 1)) ++
+            pushq !%rax
+        | _ ->
+          failwith "Shouldn't have happened.")
     | CEcstr (c, args) ->
       let n = List.length args in
       movq (imm (n + 1)) !%rdi ++
@@ -484,18 +568,61 @@ and compile_case case =
 
 let compile_dec d =
   match d with
-    | CDdefn (fid, args, e, fsize) ->
-      label fid ++
-      pushq !%rbp ++
-      movq !%rsp !%rbp ++
-      pushn fsize ++
-      compile_expr e ++
-      popq rax ++
-      popn fsize ++
-      leave ++
-      ret
+  | CDdefn (fid, args, e, fsize) when fid = "main" ->
+    vars_in_cur := 0;
+    label fid ++
+    pushq !%rbp ++
+    movq !%rsp !%rbp ++
+    pushn fsize ++
+    compile_expr e ++
+    popq rax ++
+    popn fsize ++
+    xorq !%rax !%rax ++
+    leave ++
+    ret
+  | CDdefn (fid, args, e, fsize) ->
+    vars_in_cur := List.length args;
+    label fid ++
+    pushq !%rbp ++
+    movq !%rsp !%rbp ++
+    pushn fsize ++
+    compile_expr e ++
+    popq rax ++
+    popn fsize ++
+    leave ++
+    ret
+  | CDinst (id, defns) ->
+    is_in_inst := true;
+    List.fold_left
+      (fun txt defn ->
+        match defn with
+          | CDdefn (mid, args, e, fsize) ->
+            vars_in_cur := List.length args;
+            txt ++
+            label (".meth_" ^ (string_of_int id) ^ "_" ^ (string_of_int (Smap.find mid !methods))) ++
+            pushq !%rbp ++
+            movq !%rsp !%rbp ++
+            pushn fsize ++
+            compile_expr e ++
+            popq rax ++
+            popn fsize ++
+            leave ++
+            ret
+          | _ ->
+            failwith "Shouldn't have happened")
+      nop
+      defns
+
+let adds_inst_to_data d =
+  match d with
+    | CDinst (id, defns) ->
+      label (".inst_" ^ string_of_int id) ++
+      address
+        (List.mapi
+          (fun i _ -> ".meth_" ^ string_of_int id ^ "_" ^ string_of_int i)
+          defns)
     | _ ->
-      failwith "To be implemented"
+      nop
 
 let compile_program p ofile =
   cstr_ids :=
@@ -507,6 +634,17 @@ let compile_program p ofile =
             | C _ -> true
             | _ -> false)
         !gvenv);
+  Smap.iter
+    (fun _ el ->
+      match el with
+        | TTC tc ->
+          List.iteri
+            (fun i mid ->
+              methods := Smap.add mid i !methods)
+            tc.methods
+        | _ ->
+          ())
+    !gtenv;
   let p = alloc_program p in
   let code =
     List.fold_left
@@ -518,13 +656,16 @@ let compile_program p ofile =
     { text =
         globl "main" ++
         code ++
-        (inline primitives);
+        inline primitives;
     data =
-      label ".fmt" ++
-      string "%s\n" ++
-      label ".fmt_int" ++
-      string "%s\n" ++
-      add_string_constants !str_csts_ids }
+      inline primitive_data ++
+      add_string_constants !str_csts_ids ++
+      List.fold_left
+        (fun txt d ->
+          txt ++
+          adds_inst_to_data d)
+        nop
+        p }
   in
   let f = open_out ofile in
   let fmt = formatter_of_out_channel f in
